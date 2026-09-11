@@ -13,10 +13,13 @@ See README.md for full setup (including the Tesseract OCR engine install).
 
 import os
 import re
+import base64
 import difflib
 import threading
 from datetime import datetime, date, timedelta
 
+import requests
+from dotenv import load_dotenv
 from flask import Flask, render_template, request, redirect, url_for, jsonify, flash
 from openpyxl import load_workbook
 from PIL import Image, ImageOps
@@ -27,13 +30,15 @@ DB_PATH = os.path.join(DATA_DIR, "SchoolDisciplineSystem.xlsx")
 UPLOAD_DIR = os.path.join(DATA_DIR, "scans")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 app = Flask(__name__)
 app.secret_key = "school-discipline-tracker-local-only"
 
 wb_lock = threading.RLock()
 
+# --- OCR backend #1: Tesseract (offline, free, default) ---------------------
 # Optional: point pytesseract at the Tesseract engine if it's not on PATH.
-# Uncomment and edit the line below if you installed Tesseract at the default location.
 TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 try:
     import pytesseract
@@ -42,6 +47,18 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+# --- OCR backend #2: Gemini (needs internet + a free API key, better on
+# handwriting). Used automatically when GEMINI_API_KEY is set in .env --------
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
+GEMINI_OCR_PROMPT = (
+    "This is a photo of a handwritten or printed school register page. "
+    "Transcribe every line of text exactly as written, one line per line of "
+    "the original. Output ONLY the transcribed text, no commentary, no markdown."
+)
+USING_GEMINI = bool(GEMINI_API_KEY)
 
 # Must match the column order build_excel_template.py wrote into each sheet.
 CATEGORIES = {
@@ -316,6 +333,20 @@ def dashboard_data():
 # ---------------------------------------------------------------------------
 
 def run_ocr(image_path):
+    if USING_GEMINI:
+        return run_ocr_gemini(image_path)
+    return run_ocr_tesseract(image_path)
+
+
+def ocr_ready():
+    return USING_GEMINI or OCR_AVAILABLE
+
+
+def ocr_backend_label():
+    return "Gemini (cloud)" if USING_GEMINI else "Tesseract (offline)"
+
+
+def run_ocr_tesseract(image_path):
     if not OCR_AVAILABLE:
         return "", "pytesseract is not installed on the server."
     try:
@@ -327,6 +358,58 @@ def run_ocr(image_path):
         return text, None
     except Exception as exc:  # Tesseract binary missing, etc.
         return "", str(exc)
+
+
+def parse_gemini_response(data):
+    """Extracts transcribed text from a Gemini /v1beta/interactions response.
+    Response shape: {"steps": [{"type": "model_output", "content": [{"type": "text", "text": "..."}]}]}
+    """
+    text_parts = []
+    for step in data.get("steps", []):
+        if step.get("type") != "model_output":
+            continue
+        for block in step.get("content", []):
+            if block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+    return "\n".join(text_parts).strip()
+
+
+def run_ocr_gemini(image_path):
+    try:
+        img = Image.open(image_path)
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        b64_image = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        payload = {
+            "model": GEMINI_MODEL,
+            "input": [
+                {"type": "text", "text": GEMINI_OCR_PROMPT},
+                {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
+            ],
+        }
+        resp = requests.post(
+            GEMINI_ENDPOINT,
+            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            return "", f"Gemini API error {resp.status_code}: {resp.text[:300]}"
+
+        text = parse_gemini_response(resp.json())
+        if not text:
+            return "", "Gemini returned no text (unexpected response shape)."
+        return text, None
+    except requests.exceptions.RequestException as exc:
+        return "", f"Could not reach Gemini API (check internet connection): {exc}"
+    except Exception as exc:
+        return "", f"Gemini OCR failed: {exc}"
 
 
 def parse_ocr_lines(raw_text, students):
@@ -433,10 +516,14 @@ def scan(key):
             candidates=candidates,
             raw_text=raw_text,
             error=error,
-            ocr_available=OCR_AVAILABLE,
+            ocr_available=ocr_ready(),
+            ocr_backend=ocr_backend_label(),
         )
 
-    return render_template("scan.html", key=key, cfg=cfg, categories=CATEGORIES, ocr_available=OCR_AVAILABLE)
+    return render_template(
+        "scan.html", key=key, cfg=cfg, categories=CATEGORIES,
+        ocr_available=ocr_ready(), ocr_backend=ocr_backend_label(),
+    )
 
 
 @app.route("/scan/<key>/commit", methods=["POST"])
@@ -510,5 +597,5 @@ if __name__ == "__main__":
         print("Run: python build_excel_template.py")
     else:
         print(f"Using database: {DB_PATH}")
-        print("OCR available:" , OCR_AVAILABLE)
+        print(f"OCR backend: {ocr_backend_label()} (ready: {ocr_ready()})")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

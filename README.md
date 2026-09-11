@@ -35,9 +35,21 @@ accuracy will be inconsistent — sometimes good, sometimes poor, depending on h
 and photo quality. That's exactly why the "Scan register" flow always shows a **review
 screen** before saving: every OCR-guessed name has the same autocomplete search box as
 manual entry, so staff correct mistakes in a few seconds rather than trusting OCR blindly.
-If you later want much better handwriting accuracy, the upgrade path is a cloud OCR API
-(Google Vision / Azure Document Intelligence) — that needs internet access and has a
-per-page cost, which is why it isn't the default here.
+
+### 1b-2. Optional: use Gemini instead of Tesseract (much better on handwriting)
+Google's Gemini API reads handwriting far more reliably than Tesseract, and has a free
+tier. It's **not the default** because it needs internet access on the server PC and sends
+the scanned photo to Google's servers — worth deciding deliberately since register photos
+contain real students' names, not something to turn on silently.
+
+If you want it:
+1. Get a free key at https://aistudio.google.com/apikey (no credit card needed).
+2. Copy `.env.example` to `.env` (same folder) and paste your key into `GEMINI_API_KEY=`.
+3. Restart `app.py`. It automatically uses Gemini whenever a key is present, and falls back
+   to Tesseract when `.env` is blank or missing — the "Scan register" page shows which
+   engine is active.
+
+`.env` is gitignored — your key never gets committed or pushed to GitHub.
 
 ### 1c. Create the database (only once — do not re-run after you have real data)
 ```bash
@@ -120,7 +132,9 @@ app.py                          the Flask web server
 build_excel_template.py         one-time script that creates the Excel database
 requirements.txt                Python packages needed
 run_server.bat                  double-click to start the server
+.env.example                    template for optional Gemini API key (copy to .env)
 data/SchoolDisciplineSystem.xlsx   the database (create with build_excel_template.py)
 data/scans/                     uploaded register photos are kept here for reference
 templates/, static/             the web app's pages and styling
+tests/test_app.py               automated smoke tests (run: python tests/test_app.py)
 ```

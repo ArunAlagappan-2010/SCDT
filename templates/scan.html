@@ -11,9 +11,11 @@
 
 {% if not ocr_available %}
 <div class="warn-box">
-  OCR isn't set up on this server yet (the <code>pytesseract</code>/Tesseract engine is missing). You can still upload &mdash;
-  the page will show you the upload but no text will be extracted until it's installed. See README.md.
+  OCR isn't set up on this server yet (the <code>pytesseract</code>/Tesseract engine is missing, and no Gemini API key is
+  configured). You can still upload &mdash; the page will show you the upload but no text will be extracted until one is set up. See README.md.
 </div>
+{% else %}
+<p class="small-note" style="margin-bottom:16px;">OCR engine: <b>{{ ocr_backend }}</b></p>
 {% endif %}
 
 <div class="panel">

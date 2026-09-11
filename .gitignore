@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 venv/
 
+# Secrets — real API keys live here, never commit this file.
+.env
+
 # Generated / runtime data — contains real student records once deployed.
 # The workbook is regenerated locally with `python build_excel_template.py`.
 data/*.xlsx

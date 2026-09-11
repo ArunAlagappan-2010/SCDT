@@ -2,3 +2,5 @@ flask
 openpyxl
 pillow
 pytesseract
+requests
+python-dotenv

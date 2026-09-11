@@ -132,7 +132,12 @@ def run():
         except Exception:
             return False
 
-    if tesseract_binary_available():
+    # Gemini makes a real network call -- only assert the offline-fallback
+    # behaviour deterministically; when Gemini is configured, just confirm the
+    # request didn't crash the page (network/key issues surface as flash text).
+    if appmod.USING_GEMINI:
+        check("scan review renders when using Gemini backend", r.status_code == 200)
+    elif tesseract_binary_available():
         check("scan review mentions OCR-unavailable warning is ABSENT (engine installed)", b"OCR could not run" not in r.data)
     else:
         check("scan review shows OCR-unavailable warning when engine missing", b"OCR could not run" in r.data or b"No text was detected" in r.data)
@@ -192,7 +197,26 @@ def run():
         ws = wb[key]
         check(f"{key} sheet has data validations", len(ws.data_validations.dataValidation) >= 1)
 
-    # 13. Repeat-offender aggregation math sanity check
+    # 13. Gemini response parsing (pure function, no network needed) -- shape
+    # taken from Google's documented /v1beta/interactions example response.
+    sample_response = {
+        "created": "2025-11-26T12:25:15Z",
+        "model": "gemini-3.8-flash",
+        "status": "completed",
+        "steps": [
+            {
+                "type": "model_output",
+                "content": [{"type": "text", "text": "Diya Patel\nKabir Singh"}],
+            }
+        ],
+    }
+    check("parse_gemini_response extracts text", appmod.parse_gemini_response(sample_response) == "Diya Patel\nKabir Singh")
+    check("parse_gemini_response handles empty steps", appmod.parse_gemini_response({"steps": []}) == "")
+    check("parse_gemini_response handles missing steps key", appmod.parse_gemini_response({}) == "")
+    non_output_step = {"steps": [{"type": "tool_call", "content": [{"type": "text", "text": "ignored"}]}]}
+    check("parse_gemini_response ignores non-model_output steps", appmod.parse_gemini_response(non_output_step) == "")
+
+    # 14. Repeat-offender aggregation math sanity check
     # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.
     summary, repeat_list, max_month, recent = appmod.dashboard_data()
     total_entries = sum(s["total"] for s in summary.values())
