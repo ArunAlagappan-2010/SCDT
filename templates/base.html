@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Discipline Tracker{% endblock %} - School Discipline Tracker</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">SD</span>
+      <span class="brand-text">Discipline<br>Tracker</span>
+    </div>
+    <nav>
+      <a href="{{ url_for('dashboard') }}" class="nav-link {{ 'active' if request.endpoint=='dashboard' else '' }}">Dashboard</a>
+      <div class="nav-group-label">Categories</div>
+      {% for key, cfg in categories.items() %}
+      <div class="nav-cat" style="--cat-color: {{ cfg.color }}">
+        <span class="nav-cat-dot"></span>
+        <div class="nav-cat-links">
+          <span class="nav-cat-title">{{ cfg.label }}</span>
+          <a href="{{ url_for('entry', key=key) }}" class="{{ 'active' if request.endpoint=='entry' and request.view_args.get('key')==key else '' }}">Log entry</a>
+          <a href="{{ url_for('scan', key=key) }}" class="{{ 'active' if request.endpoint=='scan' and request.view_args.get('key')==key else '' }}">Scan register</a>
+        </div>
+      </div>
+      {% endfor %}
+      <div class="nav-group-label">Data</div>
+      <a href="{{ url_for('students') }}" class="nav-link {{ 'active' if request.endpoint=='students' else '' }}">Master student list</a>
+    </nav>
+  </aside>
+  <main class="content">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <div class="flash-stack">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

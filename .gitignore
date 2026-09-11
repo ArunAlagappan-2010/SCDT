@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Generated / runtime data — contains real student records once deployed.
+# The workbook is regenerated locally with `python build_excel_template.py`.
+data/*.xlsx
+data/scans/*
+!data/scans/.gitkeep
+
+# Sample register photos — not part of the app, may contain real student handwriting.
+Training Data/
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

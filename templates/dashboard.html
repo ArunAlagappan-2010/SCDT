@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Discipline & Grooming Dashboard</h1>
+<p class="subtitle">Live counts as of {{ today.strftime('%d %b %Y') }} &mdash; pulled straight from the Excel database.</p>
+
+<div class="kpi-grid">
+  {% for key, cfg in categories.items() %}
+  {% set s = summary[key] %}
+  <div class="kpi-card" style="--cat-color: {{ cfg.color }}">
+    <h3>{{ cfg.label }}</h3>
+    <div class="kpi-total">{{ s.total }}</div>
+    <div class="small-note" style="margin-bottom:8px;">total logged</div>
+    <div class="kpi-row"><span>Today</span><b>{{ s.today }}</b></div>
+    <div class="kpi-row"><span>This week</span><b>{{ s.week }}</b></div>
+    <div class="kpi-row"><span>This month</span><b>{{ s.month }}</b></div>
+    <div class="kpi-actions">
+      <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
+      <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Scan</a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="panel">
+  <h2>This month by category</h2>
+  {% for key, cfg in categories.items() %}
+  {% set s = summary[key] %}
+  <div class="bar-row">
+    <span>{{ cfg.label }}</span>
+    <div class="bar-track"><div class="bar-fill" style="width: {{ (s.month / max_month * 100) if max_month else 0 }}%; background: {{ cfg.color }}"></div></div>
+    <span>{{ s.month }}</span>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="panel">
+  <h2>Most frequently flagged students</h2>
+  {% if repeat_list %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Class</th>
+        {% for key, cfg in categories.items() %}<th>{{ cfg.label }}</th>{% endfor %}
+        <th>Total</th></tr>
+    </thead>
+    <tbody>
+      {% for e in repeat_list %}
+      <tr>
+        <td>{{ e.name }}</td>
+        <td>{{ e['class'] }}</td>
+        {% for key in categories %}<td>{{ e.counts[key] }}</td>{% endfor %}
+        <td><b>{{ e.total }}</b></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="small-note">No entries logged yet.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Recent activity</h2>
+  {% if recent %}
+  <table>
+    <thead><tr><th>Date</th><th>Category</th><th>Name</th><th>Detail</th><th>Source</th></tr></thead>
+    <tbody>
+      {% for r in recent %}
+      <tr>
+        <td>{{ r.date.strftime('%d %b') if r.date else '' }}</td>
+        <td><span class="tag" style="background:{{ r.color }}22; color:{{ r.color }}">{{ r.category }}</span></td>
+        <td>{{ r.name }}</td>
+        <td>{{ r.detail }}</td>
+        <td>{{ r.source }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="small-note">No entries logged yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

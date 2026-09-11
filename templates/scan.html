@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }} - Scan register{% endblock %}
+{% block content %}
+<h1>{{ cfg.label }}</h1>
+<p class="subtitle">Upload a photo of the handwritten register page. You'll get to review and correct every line before anything is saved.</p>
+
+<div class="tabs">
+  <a href="{{ url_for('entry', key=key) }}">Manual entry</a>
+  <a class="active" href="{{ url_for('scan', key=key) }}">Scan register</a>
+</div>
+
+{% if not ocr_available %}
+<div class="warn-box">
+  OCR isn't set up on this server yet (the <code>pytesseract</code>/Tesseract engine is missing). You can still upload &mdash;
+  the page will show you the upload but no text will be extracted until it's installed. See README.md.
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Upload register photo</h2>
+  <form method="post" enctype="multipart/form-data" class="form-grid full">
+    <div class="field">
+      <label>Photo (JPEG/PNG) of the register page</label>
+      <input type="file" name="photo" accept="image/*" capture="environment" required>
+    </div>
+    <div class="field">
+      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Scan &amp; review</button>
+    </div>
+  </form>
+  <p class="small-note">Tip: flat lighting, no shadows, and the page filling most of the frame gives the best results. Handwriting recognition is never perfect &mdash; you'll correct names on the next screen using the same autocomplete as manual entry.</p>
+</div>
+{% endblock %}

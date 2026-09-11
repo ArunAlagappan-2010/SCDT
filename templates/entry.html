@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }} - Log entry{% endblock %}
+{% block content %}
+<h1>{{ cfg.label }}</h1>
+<p class="subtitle">Log a new case manually, or switch to Scan register to pull entries from a photo.</p>
+
+<div class="tabs">
+  <a class="active" href="{{ url_for('entry', key=key) }}">Manual entry</a>
+  <a href="{{ url_for('scan', key=key) }}">Scan register</a>
+</div>
+
+<div class="panel">
+  <h2>New entry</h2>
+  <form method="post" class="form-grid">
+    <div class="field autocomplete-wrap">
+      <label>Student name</label>
+      <input type="text" id="name-input" name="name" autocomplete="off" placeholder="Start typing to search the master list..." required>
+      <div class="autocomplete-list" id="name-list"></div>
+      <span class="small-note" id="name-meta"></span>
+    </div>
+    <div class="field">
+      <label>Logged by (staff name)</label>
+      <input type="text" name="logged_by" placeholder="e.g. Mrs. Rao">
+    </div>
+    {% for field, itype in cfg.extra_fields %}
+    <div class="field">
+      <label>{{ field }}</label>
+      <input type="text" name="{{ field }}" placeholder="{{ field }}">
+    </div>
+    {% endfor %}
+    <div class="field span2">
+      <label>Remarks</label>
+      <textarea name="remarks" placeholder="Any additional notes"></textarea>
+    </div>
+    <div class="field span2">
+      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save entry</button>
+    </div>
+  </form>
+  <p class="small-note">Not in the list yet? Add the student on the <a href="{{ url_for('students') }}">master student list</a> page first.</p>
+</div>
+
+<div class="panel">
+  <h2>Recently logged</h2>
+  {% if recent_rows %}
+  <table>
+    <thead><tr><th>Date</th><th>Name</th><th>Class</th>{% for f,_ in cfg.extra_fields %}<th>{{ f }}</th>{% endfor %}<th>Remarks</th><th>By</th><th>Source</th></tr></thead>
+    <tbody>
+      {% for row in recent_rows %}
+      <tr>
+        <td>{{ row.Date.strftime('%d %b %Y') if row.Date and row.Date.strftime else row.Date }}</td>
+        <td>{{ row.Name }}</td>
+        <td>{{ row.Class }}</td>
+        {% for f,_ in cfg.extra_fields %}<td>{{ row[f] }}</td>{% endfor %}
+        <td>{{ row.Remarks }}</td>
+        <td>{{ row.LoggedBy }}</td>
+        <td>{{ row.Source }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="small-note">Nothing logged yet.</p>
+  {% endif %}
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  attachAutocomplete(document.getElementById('name-input'), document.getElementById('name-list'), {
+    onSelect: function (s) {
+      document.getElementById('name-meta').textContent = 'Class ' + (s.class || '?') + (s.section ? '-' + s.section : '') + ' | Roll ' + (s.roll || '?');
+    }
+  });
+</script>
+{% endblock %}

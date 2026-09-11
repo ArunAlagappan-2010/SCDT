@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.label }} - Review scan{% endblock %}
+{% block content %}
+<h1>{{ cfg.label }} &mdash; review scanned lines</h1>
+<p class="subtitle">OCR read the lines below. Fix any names it got wrong (use the search box), uncheck lines that aren't real entries, then save.</p>
+
+{% if error %}
+<div class="warn-box">OCR could not run: {{ error }}. See README.md for installing the Tesseract engine.</div>
+{% endif %}
+
+{% if not candidates %}
+<div class="panel">
+  <p>No text was detected in that photo. Try a clearer, well-lit photo, or use <a href="{{ url_for('entry', key=key) }}">manual entry</a> instead.</p>
+  <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Try another photo</a>
+</div>
+{% else %}
+<form method="post" action="{{ url_for('scan_commit', key=key) }}">
+  <div class="panel">
+    <div class="form-grid" style="margin-bottom: 10px;">
+      <div class="field">
+        <label>Logged by (staff name)</label>
+        <input type="text" name="logged_by" placeholder="e.g. Mrs. Rao">
+      </div>
+    </div>
+    <table class="review-table">
+      <thead>
+        <tr>
+          <th>Use?</th>
+          <th>OCR read this as</th>
+          <th>Student name</th>
+          {% for field, _ in cfg.extra_fields %}<th>{{ field }}</th>{% endfor %}
+          <th>Remarks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in candidates %}
+        <tr>
+          <td class="pill-checkbox">
+            <input type="checkbox" name="row_include" value="{{ loop.index0 }}" {{ 'checked' if c.confident else '' }}>
+          </td>
+          <td><span class="raw-text">{{ c.raw_text }}</span></td>
+          <td class="autocomplete-wrap">
+            <input type="text" class="row-name-input" name="row_name" value="{{ c.guess_name }}" autocomplete="off">
+            <div class="autocomplete-list row-name-list"></div>
+          </td>
+          {% for field, _ in cfg.extra_fields %}
+          <td><input type="text" name="row_{{ field }}" placeholder="{{ field }}"></td>
+          {% endfor %}
+          <td><input type="text" name="row_remarks" placeholder="Remarks"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div style="margin-top: 16px;">
+      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save checked entries</button>
+      <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Discard &amp; rescan</a>
+    </div>
+  </div>
+</form>
+
+<details class="panel">
+  <summary style="cursor:pointer; font-weight:600; color: var(--navy);">Raw OCR text (for reference)</summary>
+  <pre class="raw-text" style="white-space: pre-wrap; margin-top:10px;">{{ raw_text }}</pre>
+</details>
+{% endif %}
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  document.querySelectorAll('tr').forEach(function (row) {
+    const input = row.querySelector('.row-name-input');
+    const list = row.querySelector('.row-name-list');
+    if (input && list) attachAutocomplete(input, list);
+  });
+</script>
+{% endblock %}
