@@ -50,42 +50,44 @@
         <text x="20" y="112" font-size="11" fill="var(--muted)">0</text>
         <text x="170" y="112" font-size="11" fill="var(--muted)">100</text>
       </svg>
-      <div class="bento-number" style="font-size:26px;">{{ stats.source_ocr_pct }}<span class="unit">%</span></div>
+      <div class="bento-number bento-number--md">{{ stats.source_ocr_pct }}<span class="unit">%</span></div>
       <div class="bento-sub">of entries logged via scan</div>
     </div>
 
     {% if stats.top_student %}
     <div class="bento-card">
       <h3>Most flagged</h3>
-      <div class="bento-number" style="font-size:22px;">{{ stats.top_student.name }}</div>
+      <div class="bento-number bento-number--sm">{{ stats.top_student.name }}</div>
       <div class="bento-sub">Class {{ stats.top_student['class'] }} &mdash; {{ stats.top_student.total }} total {{ 'flag' if stats.top_student.total == 1 else 'flags' }}</div>
     </div>
     {% endif %}
   </div>
 
-  <!-- Column 2: per category -->
+  <!-- Column 2: per category, packed 2x2 so four cards read as one organized block -->
   <div class="bento-col">
     <div class="bento-col-header">By category</div>
-    {% for key, cfg in categories.items() %}
-    {% set s = summary[key] %}
-    <div class="bento-card" style="--cat-color: {{ cfg.color }};">
-      <h3>{{ cfg.label }}</h3>
-      <div class="bento-number" style="color: {{ cfg.color }};">{{ s.total }}</div>
-      <div class="bento-sub">{{ s.month }} this month &middot; {{ s.today }} today</div>
-      <div class="bento-mini-bars">
-        {% for p in stats.trends[key] %}
-        <div class="bar" style="height: {{ (p.count / stats.trend_max * 100) if stats.trend_max else 2 }}%; background: {{ cfg.color }};" title="{{ p.label }}: {{ p.count }}"></div>
-        {% endfor %}
+    <div class="bento-subgrid">
+      {% for key, cfg in categories.items() %}
+      {% set s = summary[key] %}
+      <div class="bento-card" style="--cat-color: {{ cfg.color }}; border-color: {{ cfg.color }};">
+        <h3>{{ cfg.label }}</h3>
+        <div class="bento-number bento-number--md" style="color: {{ cfg.color }};">{{ s.total }}</div>
+        <div class="bento-sub">{{ s.month }} this month &middot; {{ s.today }} today</div>
+        <div class="bento-mini-bars">
+          {% for p in stats.trends[key] %}
+          <div class="bar" style="height: {{ (p.count / stats.trend_max * 100) if stats.trend_max else 2 }}%; background: {{ cfg.color }};" title="{{ p.label }}: {{ p.count }}"></div>
+          {% endfor %}
+        </div>
+        <div class="kpi-actions" style="margin-top:12px;">
+          <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
+          <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
+        </div>
       </div>
-      <div class="kpi-actions" style="margin-top:12px;">
-        <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
-        <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
-      </div>
+      {% endfor %}
     </div>
-    {% endfor %}
   </div>
 
-  <!-- Column 3: breakdowns -->
+  <!-- Column 3: one headline breakdown card, then a packed 2-up row below it -->
   <div class="bento-col">
     <div class="bento-col-header">Breakdown</div>
 
@@ -104,29 +106,31 @@
       {% endif %}
     </div>
 
-    <div class="bento-card">
-      <h3>By class</h3>
-      {% if stats.class_breakdown %}
-        {% for c in stats.class_breakdown %}
-        <div class="bento-list-row">
-          <span>Class {{ c.label }}</span>
-          <span class="val">{{ c.count }}</span>
-        </div>
-        {% endfor %}
-      {% else %}
-        <p class="small-note">No data yet.</p>
-      {% endif %}
-    </div>
-
-    <div class="bento-card">
-      <h3>How entries get logged</h3>
-      <div class="stat-strip">
-        <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual</div></div>
-        <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned</div></div>
+    <div class="bento-subgrid">
+      <div class="bento-card">
+        <h3>By class</h3>
+        {% if stats.class_breakdown %}
+          {% for c in stats.class_breakdown %}
+          <div class="bento-list-row">
+            <span>Class {{ c.label }}</span>
+            <span class="val">{{ c.count }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="small-note">No data yet.</p>
+        {% endif %}
       </div>
-      <div class="split-bar">
-        <div style="width: {{ stats.source_manual_pct }}%;"></div>
-        <div style="width: {{ stats.source_ocr_pct }}%;"></div>
+
+      <div class="bento-card">
+        <h3>Logged how</h3>
+        <div class="stat-strip">
+          <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual</div></div>
+          <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned</div></div>
+        </div>
+        <div class="split-bar">
+          <div style="width: {{ stats.source_manual_pct }}%;"></div>
+          <div style="width: {{ stats.source_ocr_pct }}%;"></div>
+        </div>
       </div>
     </div>
   </div>
