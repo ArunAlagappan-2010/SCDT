@@ -105,15 +105,20 @@ startup, or ask me to set that up.
 ## 3. Day-to-day workflow
 
 1. **Master student list** (`/students`) — add every student once (name, class, section,
-   roll no). This is the list every autocomplete/dropdown pulls from. Keep it updated as
-   students join/leave, or to fix a misspelled name.
+   roll no, **house**). This is the list every autocomplete/dropdown pulls from, and the
+   source of truth for a student's House/Class once their name is matched anywhere else in
+   the system. Keep it updated as students join/leave, or to fix a misspelled name.
 2. **Manual entry** — pick a category (e.g. Late Comers) → "Log entry" → start typing a
    name → pick the matching student from the dropdown (this is what prevents duplicate or
    misspelled name records) → fill in the category-specific field + remarks → Save.
 3. **Scan register** — same category → "Scan register" → upload a photo of the paper
-   register page → review each OCR-guessed line, fix names via the same search box,
-   uncheck any junk lines → Save. Nothing is written to the database until you click Save
-   on the review screen.
+   register page. The review screen shows one row per detected student with three boxes:
+   **House**, **Name** (with the same autocomplete as manual entry), and **Class**. The
+   register's own header row (the line that just says "House / Name / Class") is
+   automatically filtered out and never shown as a fake entry. Picking a name from the
+   autocomplete overwrites House/Class with that student's real master-list record; fix
+   anything else, uncheck junk lines, then Save. Nothing is written to the database until
+   you click Save on the review screen.
 4. **Dashboard** (`/`) — live KPI cards (today/this week/this month/all-time) per category,
    a "most frequently flagged students" leaderboard, and a recent-activity feed.
 
@@ -130,6 +135,7 @@ fail until you close it.
 ```
 app.py                          the Flask web server
 build_excel_template.py         one-time script that creates the Excel database
+migrate_add_house.py            one-time script that added the House column to an existing database
 requirements.txt                Python packages needed
 run_server.bat                  double-click to start the server
 .env.example                    template for optional Gemini API key (copy to .env)

@@ -66,7 +66,7 @@ CATEGORY_SHEETS = {
 }
 
 BASE_COLS = ["EntryID", "Date"]
-NAME_COLS = ["Name", "Class", "Section"]
+NAME_COLS = ["Name", "Class", "Section", "House"]
 TAIL_COLS = ["Remarks", "LoggedBy", "Source"]
 
 
@@ -86,20 +86,20 @@ def autosize(ws, widths):
 
 def build_master_list(wb):
     ws = wb.create_sheet("MasterList")
-    headers = ["StudentID", "Name", "Class", "Section", "RollNo"]
+    headers = ["StudentID", "Name", "Class", "Section", "RollNo", "House"]
     ws.append(headers)
     style_header_row(ws, 1, len(headers), NAVY)
-    autosize(ws, [12, 28, 10, 10, 10])
+    autosize(ws, [12, 28, 10, 10, 10, 14])
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = "A1:E1"
+    ws.auto_filter.ref = "A1:F1"
 
     # A handful of example rows so the dropdowns/autocomplete have something to show.
     examples = [
-        ("STU001", "Aarav Sharma", "9", "A", "1"),
-        ("STU002", "Diya Patel", "9", "A", "2"),
-        ("STU003", "Kabir Singh", "9", "B", "1"),
-        ("STU004", "Meera Nair", "10", "A", "1"),
-        ("STU005", "Rohan Gupta", "10", "B", "3"),
+        ("STU001", "Aarav Sharma", "9", "A", "1", "Red"),
+        ("STU002", "Diya Patel", "9", "A", "2", "Blue"),
+        ("STU003", "Kabir Singh", "9", "B", "1", "Green"),
+        ("STU004", "Meera Nair", "10", "A", "1", "Yellow"),
+        ("STU005", "Rohan Gupta", "10", "B", "3", "Red"),
     ]
     for row in examples:
         ws.append(row)
@@ -124,13 +124,11 @@ def build_category_sheet(wb, key, cfg):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
 
-    widths = [10, 12, 26, 8, 8] + [16] * len(cfg["extra_cols"]) + [26, 14, 10]
+    widths = [10, 12, 26, 8, 8, 14] + [16] * len(cfg["extra_cols"]) + [26, 14, 10]
     autosize(ws, widths)
 
     name_col_idx = len(BASE_COLS) + 1  # Name is first of NAME_COLS
     name_col_letter = get_column_letter(name_col_idx)
-    class_col_letter = get_column_letter(name_col_idx + 1)
-    section_col_letter = get_column_letter(name_col_idx + 2)
 
     # Dropdown on Name, sourced from the master list -- this is the
     # "type a name, pick the right one from the updated list" behaviour
@@ -141,13 +139,16 @@ def build_category_sheet(wb, key, cfg):
     ws.add_data_validation(dv)
     dv.add(f"{name_col_letter}2:{name_col_letter}1000")
 
-    # Auto-fill Class/Section from MasterList once a Name is chosen.
+    # Auto-fill Class/Section/House from MasterList once a Name is chosen.
     for r in range(2, 1001):
         ws.cell(row=r, column=name_col_idx + 1).value = (
             f'=IFERROR(VLOOKUP({name_col_letter}{r},MasterList!$B:$D,2,FALSE),"")'
         )
         ws.cell(row=r, column=name_col_idx + 2).value = (
             f'=IFERROR(VLOOKUP({name_col_letter}{r},MasterList!$B:$D,3,FALSE),"")'
+        )
+        ws.cell(row=r, column=name_col_idx + 3).value = (
+            f'=IFERROR(VLOOKUP({name_col_letter}{r},MasterList!$B:$F,5,FALSE),"")'
         )
 
     source_col_idx = len(headers)

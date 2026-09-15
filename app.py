@@ -13,6 +13,7 @@ See README.md for full setup (including the Tesseract OCR engine install).
 
 import os
 import re
+import json
 import base64
 import difflib
 import threading
@@ -54,9 +55,19 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 GEMINI_OCR_PROMPT = (
-    "This is a photo of a handwritten or printed school register page. "
-    "Transcribe every line of text exactly as written, one line per line of "
-    "the original. Output ONLY the transcribed text, no commentary, no markdown."
+    "This is a photo of a handwritten or printed school register page with "
+    "columns including House, Name, and Class (there may be other columns too "
+    "-- ignore those). For every row that is an actual student entry, extract "
+    "its House, Name, and Class. "
+    "Do NOT include the header/title row -- that is the row that just repeats "
+    "the column labels themselves (words like \"House\", \"Name\", \"Class\", "
+    "\"Section\", \"Roll\", \"S.No\", \"Date\" etc used as headings, not as a "
+    "real student's data) -- skip it entirely, it is not a student. "
+    "If a value is missing or unreadable for a real row, use an empty string "
+    "for that field, but still include the row if at least the name is readable. "
+    "Respond with ONLY a raw JSON array, no markdown code fences, no commentary, "
+    "in exactly this shape: "
+    '[{"house": "...", "name": "...", "class": "..."}, ...]'
 )
 USING_GEMINI = bool(GEMINI_API_KEY)
 
@@ -94,7 +105,7 @@ MAX_MASTER_ROWS = 2000
 
 def sheet_columns(key):
     cfg = CATEGORIES[key]
-    return ["EntryID", "Date", "Name", "Class", "Section"] + [f[0] for f in cfg["extra_fields"]] + [
+    return ["EntryID", "Date", "Name", "Class", "Section", "House"] + [f[0] for f in cfg["extra_fields"]] + [
         "Remarks",
         "LoggedBy",
         "Source",
@@ -130,6 +141,7 @@ def get_master_students():
                 "class": row[2].value or "",
                 "section": row[3].value or "",
                 "roll": row[4].value or "",
+                "house": (row[5].value or "") if len(row) > 5 else "",
             })
         return students
 
@@ -162,7 +174,7 @@ def next_master_id(ws):
     return f"STU{max_num + 1:03d}"
 
 
-def add_student(name, klass, section, roll):
+def add_student(name, klass, section, roll, house=""):
     with wb_lock:
         wb = open_wb()
         ws = wb["MasterList"]
@@ -173,11 +185,12 @@ def add_student(name, klass, section, roll):
         ws.cell(row=r, column=3, value=klass)
         ws.cell(row=r, column=4, value=section)
         ws.cell(row=r, column=5, value=roll)
+        ws.cell(row=r, column=6, value=house)
         wb.save(DB_PATH)
         return sid
 
 
-def update_student(student_id, name, klass, section, roll):
+def update_student(student_id, name, klass, section, roll, house=""):
     with wb_lock:
         wb = open_wb()
         ws = wb["MasterList"]
@@ -187,6 +200,7 @@ def update_student(student_id, name, klass, section, roll):
                 ws.cell(row=r, column=3, value=klass)
                 ws.cell(row=r, column=4, value=section)
                 ws.cell(row=r, column=5, value=roll)
+                ws.cell(row=r, column=6, value=house)
                 wb.save(DB_PATH)
                 return True
         return False
@@ -230,6 +244,7 @@ def append_log_entry(key, values_by_header, logged_by, source):
             "Name": values_by_header.get("Name", ""),
             "Class": match["class"] if match else values_by_header.get("Class", ""),
             "Section": match["section"] if match else values_by_header.get("Section", ""),
+            "House": match["house"] if match else values_by_header.get("House", ""),
             "Remarks": values_by_header.get("Remarks", ""),
             "LoggedBy": logged_by or "",
             "Source": source,
@@ -333,12 +348,15 @@ def dashboard_data():
 # ---------------------------------------------------------------------------
 
 def run_ocr(image_path):
-    """Returns (text, error, warning). `error` means nothing usable came back.
-    `warning` means it succeeded but via a fallback worth telling the user about."""
+    """Returns (text, error, warning, backend). `error` means nothing usable
+    came back. `warning` means it succeeded but via a fallback worth telling
+    the user about. `backend` is "gemini" or "tesseract" -- whichever one
+    actually produced `text`, since Gemini output is structured JSON and
+    Tesseract output is plain text; callers need to know which to parse."""
     if USING_GEMINI:
         text, error = run_ocr_gemini(image_path)
         if error is None:
-            return text, None, None
+            return text, None, None, "gemini"
         if OCR_AVAILABLE:
             fallback_text, fallback_error = run_ocr_tesseract(image_path)
             if fallback_error is None:
@@ -347,11 +365,11 @@ def run_ocr(image_path):
                     "Tesseract engine instead for this scan. Handwriting accuracy will "
                     "be lower than usual; double-check names carefully below."
                 )
-                return fallback_text, None, warning
-            return "", f"Gemini failed ({error}), and the Tesseract fallback also failed ({fallback_error}).", None
-        return text, error, None
+                return fallback_text, None, warning, "tesseract"
+            return "", f"Gemini failed ({error}), and the Tesseract fallback also failed ({fallback_error}).", None, None
+        return text, error, None, None
     text, error = run_ocr_tesseract(image_path)
-    return text, error, None
+    return text, error, None, "tesseract"
 
 
 def ocr_ready():
@@ -432,7 +450,88 @@ def run_ocr_gemini(image_path):
         return "", f"Gemini OCR failed: {exc}"
 
 
+# Column-heading words that should never be treated as a student's data --
+# guards against the OCR engine (or the heuristic column splitter below)
+# picking up the register's own header row as if it were a real entry.
+HEADER_WORDS = {
+    "house", "name", "class", "section", "roll", "roll no", "roll no.",
+    "reason", "remarks", "date", "time", "issue", "sl", "sl.no", "s.no",
+    "sno", "no", "no.", "signature", "student name", "student",
+}
+
+
+def is_header_like(tokens):
+    cleaned = [t.strip(" .:").lower() for t in tokens if t.strip()]
+    if not cleaned:
+        return False
+    hits = sum(1 for t in cleaned if t in HEADER_WORDS)
+    return hits >= max(1, (len(cleaned) + 1) // 2)
+
+
+def match_name(name, names):
+    if not name:
+        return None
+    matches = difflib.get_close_matches(name, names, n=1, cutoff=0.45)
+    return matches[0] if matches else None
+
+
+def parse_structured_ocr_json(text):
+    """Parses Gemini's requested [{"house","name","class"}, ...] JSON output.
+    Returns a list of dicts, or None if the text isn't valid JSON in that
+    shape (signals the caller to fall back to plain-text line parsing)."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
+        cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+    try:
+        rows = json.loads(cleaned)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        result.append({
+            "house": str(row.get("house") or "").strip(),
+            "name": str(row.get("name") or "").strip(),
+            "klass": str(row.get("class") or "").strip(),
+        })
+    return result
+
+
+def build_candidates_from_structured(rows, students):
+    names = [s["name"] for s in students]
+    candidates = []
+    for row in rows:
+        name = row["name"]
+        if not name or name.strip().lower() in HEADER_WORDS:
+            continue  # no name to work with, or the model slipped in a header row anyway
+        best = match_name(name, names)
+        candidates.append({
+            "raw_text": " / ".join(v for v in (row["house"], name, row["klass"]) if v),
+            "guess_house": row["house"],
+            "guess_name": best or name,
+            "guess_class": row["klass"],
+            "confident": bool(best),
+        })
+    return candidates
+
+
+def split_columns(line):
+    """Best-effort column split for plain OCR text (Tesseract has no concept
+    of table structure) -- splits on runs of 2+ spaces or tabs, which is how
+    column gaps often survive into OCR'd text."""
+    parts = re.split(r"\s{2,}|\t+", line.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
 def parse_ocr_lines(raw_text, students):
+    """Heuristic House/Name/Class extraction from plain OCR text (the
+    Tesseract path -- Gemini's structured JSON is handled separately, far
+    more reliably, by build_candidates_from_structured)."""
     names = [s["name"] for s in students]
     lines = [ln.strip() for ln in raw_text.splitlines()]
     lines = [re.sub(r"^[\W_]+", "", ln) for ln in lines]  # strip leading bullets/numbers/punct
@@ -440,17 +539,40 @@ def parse_ocr_lines(raw_text, students):
 
     candidates = []
     for ln in lines:
-        best = None
-        if names:
-            matches = difflib.get_close_matches(ln, names, n=1, cutoff=0.45)
-            if matches:
-                best = matches[0]
+        parts = split_columns(ln)
+        if is_header_like(parts if len(parts) > 1 else ln.split()):
+            continue  # this line is the column-title row, not a student
+
+        if len(parts) >= 3:
+            house, name, klass = parts[0], parts[1], parts[2]
+        elif len(parts) == 2:
+            house, name, klass = "", parts[0], parts[1]
+        else:
+            house, name, klass = "", ln, ""
+
+        best = match_name(name, names)
         candidates.append({
             "raw_text": ln,
-            "guess_name": best or "",
+            "guess_house": house,
+            "guess_name": best or name,
+            "guess_class": klass,
             "confident": bool(best),
         })
     return candidates
+
+
+def extract_candidates(raw_text, students, backend):
+    """Turns raw OCR output into review-table candidates, using structured
+    JSON parsing for Gemini and heuristic line parsing for Tesseract."""
+    if not raw_text:
+        return []
+    if backend == "gemini":
+        structured = parse_structured_ocr_json(raw_text)
+        if structured is not None:
+            return build_candidates_from_structured(structured, students)
+        # Gemini didn't follow the JSON format for some reason -- fall back
+        # to treating its output as plain text rather than losing the scan.
+    return parse_ocr_lines(raw_text, students)
 
 
 # ---------------------------------------------------------------------------
@@ -524,9 +646,9 @@ def scan(key):
         save_path = os.path.join(UPLOAD_DIR, filename)
         file.save(save_path)
 
-        raw_text, error, warning = run_ocr(save_path)
+        raw_text, error, warning, backend = run_ocr(save_path)
         students = get_master_students()
-        candidates = parse_ocr_lines(raw_text, students) if raw_text else []
+        candidates = extract_candidates(raw_text, students, backend)
 
         return render_template(
             "scan_review.html",
@@ -554,6 +676,8 @@ def scan_commit(key):
     cfg = CATEGORIES[key]
 
     names = request.form.getlist("row_name")
+    houses = request.form.getlist("row_house")
+    classes = request.form.getlist("row_class")
     includes = request.form.getlist("row_include")  # values are the row indices that were checked
     extra_lists = {field: request.form.getlist(f"row_{field}") for field, _ in cfg["extra_fields"]}
     remarks_list = request.form.getlist("row_remarks")
@@ -567,7 +691,12 @@ def scan_commit(key):
         name = name.strip()
         if not name:
             continue
-        values = {"Name": name, "Remarks": remarks_list[i] if i < len(remarks_list) else ""}
+        values = {
+            "Name": name,
+            "House": houses[i].strip() if i < len(houses) else "",
+            "Class": classes[i].strip() if i < len(classes) else "",
+            "Remarks": remarks_list[i] if i < len(remarks_list) else "",
+        }
         for field, _ in cfg["extra_fields"]:
             lst = extra_lists[field]
             values[field] = lst[i] if i < len(lst) else ""
@@ -590,6 +719,7 @@ def students():
                     request.form.get("klass", "").strip(),
                     request.form.get("section", "").strip(),
                     request.form.get("roll", "").strip(),
+                    request.form.get("house", "").strip(),
                 )
                 flash(f"Added {name} to the master list.", "success")
         elif action == "edit_all":
@@ -598,6 +728,7 @@ def students():
             klasses = request.form.getlist("klass")
             sections = request.form.getlist("section")
             rolls = request.form.getlist("roll")
+            houses = request.form.getlist("house")
             for i, sid in enumerate(ids):
                 update_student(
                     sid,
@@ -605,6 +736,7 @@ def students():
                     klasses[i].strip() if i < len(klasses) else "",
                     sections[i].strip() if i < len(sections) else "",
                     rolls[i].strip() if i < len(rolls) else "",
+                    houses[i].strip() if i < len(houses) else "",
                 )
             flash(f"Updated {len(ids)} student record(s).", "success")
         return redirect(url_for("students"))

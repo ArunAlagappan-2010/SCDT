@@ -30,7 +30,9 @@
         <tr>
           <th>Use?</th>
           <th>OCR read this as</th>
+          <th>House</th>
           <th>Student name</th>
+          <th>Class</th>
           {% for field, _ in cfg.extra_fields %}<th>{{ field }}</th>{% endfor %}
           <th>Remarks</th>
         </tr>
@@ -42,10 +44,12 @@
             <input type="checkbox" name="row_include" value="{{ loop.index0 }}" {{ 'checked' if c.confident else '' }}>
           </td>
           <td><span class="raw-text">{{ c.raw_text }}</span></td>
+          <td><input type="text" class="row-house-input" name="row_house" value="{{ c.guess_house }}" placeholder="House"></td>
           <td class="autocomplete-wrap">
             <input type="text" class="row-name-input" name="row_name" value="{{ c.guess_name }}" autocomplete="off">
             <div class="autocomplete-list row-name-list"></div>
           </td>
+          <td><input type="text" class="row-class-input" name="row_class" value="{{ c.guess_class }}" placeholder="Class"></td>
           {% for field, _ in cfg.extra_fields %}
           <td><input type="text" name="row_{{ field }}" placeholder="{{ field }}"></td>
           {% endfor %}
@@ -72,7 +76,17 @@
   document.querySelectorAll('tr').forEach(function (row) {
     const input = row.querySelector('.row-name-input');
     const list = row.querySelector('.row-name-list');
-    if (input && list) attachAutocomplete(input, list);
+    if (!input || !list) return;
+    attachAutocomplete(input, list, {
+      onSelect: function (s) {
+        // A confirmed student match is the source of truth -- overwrite
+        // whatever OCR guessed for House/Class with the master record.
+        const houseInput = row.querySelector('.row-house-input');
+        const classInput = row.querySelector('.row-class-input');
+        if (houseInput) houseInput.value = s.house || houseInput.value;
+        if (classInput) classInput.value = (s.class || classInput.value) + (s.section ? '-' + s.section : '');
+      }
+    });
   });
 </script>
 {% endblock %}

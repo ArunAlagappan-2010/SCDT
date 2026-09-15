@@ -156,6 +156,8 @@ def run():
         "/scan/Uniform/commit",
         data={
             "row_name": ["Aarav Sharma", "Diya Patel"],
+            "row_house": ["Wrong Guess", ""],  # OCR's raw guess -- matched student's real House should win
+            "row_class": ["9", ""],
             "row_include": ["0"],  # only the first row is checked
             "row_Issue": ["Shoes", "Blazer"],
             "row_remarks": ["", ""],
@@ -168,14 +170,20 @@ def run():
     check("scan commit saved exactly the checked row", len(uniform_rows) == 2, f"rows={uniform_rows}")
     ocr_rows = [row for row in uniform_rows if row.get("Source") == "OCR"]
     check("scan commit row has Source=OCR", len(ocr_rows) == 1 and ocr_rows[0]["Name"] == "Aarav Sharma", str(ocr_rows))
+    check(
+        "scan commit uses the matched student's real House, not OCR's raw guess",
+        ocr_rows and ocr_rows[0]["House"] == "Red",
+        str(ocr_rows),
+    )
 
     # 10. Master student list: add + edit_all
     r = client.get("/students")
     check("GET /students loads", r.status_code == 200)
 
-    r = client.post("/students", data={"action": "add", "name": "Test Student", "klass": "8", "section": "C", "roll": "9"}, follow_redirects=True)
+    r = client.post("/students", data={"action": "add", "name": "Test Student", "klass": "8", "section": "C", "roll": "9", "house": "Purple"}, follow_redirects=True)
     students = appmod.get_master_students()
     check("student added", any(s["name"] == "Test Student" for s in students), str(students))
+    check("student added with House", next(s for s in students if s["name"] == "Test Student")["house"] == "Purple")
 
     new_student = next(s for s in students if s["name"] == "Test Student")
     ids = [s["id"] for s in students]
@@ -183,13 +191,15 @@ def run():
     klasses = [s["class"] for s in students]
     sections = [s["section"] for s in students]
     rolls = [s["roll"] for s in students]
+    houses = [("Orange" if s["id"] == new_student["id"] else s["house"]) for s in students]
     r = client.post("/students", data={
         "action": "edit_all", "student_id": ids, "name": names,
-        "klass": klasses, "section": sections, "roll": rolls,
+        "klass": klasses, "section": sections, "roll": rolls, "house": houses,
     }, follow_redirects=True)
     students2 = appmod.get_master_students()
     check("edit_all renamed the right student", any(s["name"] == "Renamed Student" for s in students2), str(students2))
     check("edit_all did not affect other students", sum(1 for s in students2 if s["name"] == "Rohan Gupta") == 1)
+    check("edit_all updated House too", next(s for s in students2 if s["name"] == "Renamed Student")["house"] == "Orange")
 
     # 11. Autocomplete reflects newly added/renamed student
     r = client.get("/api/students?q=Renamed")
@@ -235,24 +245,81 @@ def run():
         appmod.OCR_AVAILABLE = True
 
         appmod.run_ocr_gemini = lambda path: ("Gemini text", None)
-        text, error, warning = appmod.run_ocr("fake-path")
+        text, error, warning, backend = appmod.run_ocr("fake-path")
         check("run_ocr uses Gemini text when it succeeds", text == "Gemini text" and error is None and warning is None)
+        check("run_ocr reports backend=gemini on success", backend == "gemini")
 
         appmod.run_ocr_gemini = lambda path: ("", "high demand, try again later")
         appmod.run_ocr_tesseract = lambda path: ("Tesseract fallback text", None)
-        text, error, warning = appmod.run_ocr("fake-path")
+        text, error, warning, backend = appmod.run_ocr("fake-path")
         check("run_ocr falls back to Tesseract when Gemini fails", text == "Tesseract fallback text" and error is None)
         check("run_ocr surfaces a warning (not a hard error) on fallback", warning is not None and "Tesseract" in warning)
+        check("run_ocr reports backend=tesseract after fallback", backend == "tesseract")
 
         appmod.run_ocr_gemini = lambda path: ("", "high demand, try again later")
         appmod.run_ocr_tesseract = lambda path: ("", "tesseract also broken")
-        text, error, warning = appmod.run_ocr("fake-path")
+        text, error, warning, backend = appmod.run_ocr("fake-path")
         check("run_ocr reports a hard error when both backends fail", error is not None and "also failed" in error)
     finally:
         appmod.run_ocr_gemini = orig_gemini
         appmod.run_ocr_tesseract = orig_tesseract
         appmod.USING_GEMINI = orig_using_gemini
         appmod.OCR_AVAILABLE = orig_ocr_available
+
+    # 13c. Structured House/Name/Class extraction (the Gemini path) -- this is
+    # the actual feature requested: pull 3 fields per row, and never treat the
+    # register's own column-heading row as if it were a student.
+    students_for_ocr = appmod.get_master_students()
+
+    gemini_json_text = (
+        '[{"house": "House", "name": "Name", "class": "Class"},'
+        ' {"house": "Red", "name": "Rohan Gupta", "class": "10"},'
+        ' {"house": "Blue", "name": "Totally Unknown Kid", "class": "7"}]'
+    )
+    structured = appmod.parse_structured_ocr_json(gemini_json_text)
+    check("parse_structured_ocr_json parses a plain JSON array", structured is not None and len(structured) == 3)
+
+    candidates = appmod.build_candidates_from_structured(structured, students_for_ocr)
+    check(
+        "build_candidates_from_structured drops the header row even if the model included it",
+        all(c["guess_name"] != "Name" for c in candidates),
+        str(candidates),
+    )
+    check("build_candidates_from_structured keeps the 2 real rows", len(candidates) == 2, str(candidates))
+    rohan_candidate = next((c for c in candidates if "Rohan" in c["guess_name"]), None)
+    check("build_candidates_from_structured matches a known student by name", rohan_candidate is not None and rohan_candidate["confident"])
+    check("build_candidates_from_structured carries House through", rohan_candidate is not None and rohan_candidate["guess_house"] == "Red")
+    check("build_candidates_from_structured carries Class through", rohan_candidate is not None and rohan_candidate["guess_class"] == "10")
+    unknown_candidate = next((c for c in candidates if "Unknown" in c["guess_name"]), None)
+    check("unmatched name still comes through unconfident (for manual review)", unknown_candidate is not None and not unknown_candidate["confident"])
+
+    # Gemini wrapping its JSON in a markdown code fence (common LLM habit) should still parse.
+    fenced = "```json\n" + gemini_json_text + "\n```"
+    check("parse_structured_ocr_json strips markdown code fences", appmod.parse_structured_ocr_json(fenced) is not None)
+
+    # Plain prose (Gemini ignored the JSON instruction) should signal "fall back", not crash.
+    check("parse_structured_ocr_json returns None for non-JSON text", appmod.parse_structured_ocr_json("Rohan Gupta\nDiya Patel") is None)
+
+    # 13d. Heuristic column split + header filtering (the Tesseract plain-text path)
+    check("is_header_like flags a real header row", appmod.is_header_like(["House", "Name", "Class"]))
+    check("is_header_like does not flag a real student row", not appmod.is_header_like(["Red", "Rohan Gupta", "10"]))
+
+    tesseract_lines = appmod.parse_ocr_lines(
+        "House    Name    Class\nRed    Rohan Gupta    10\nBlue    Diya Patel    9",
+        students_for_ocr,
+    )
+    check("parse_ocr_lines (Tesseract path) also drops the header line", len(tesseract_lines) == 2, str(tesseract_lines))
+    check(
+        "parse_ocr_lines splits House/Name/Class from spaced columns",
+        tesseract_lines[0]["guess_house"] == "Red" and tesseract_lines[0]["guess_class"] == "10",
+        str(tesseract_lines),
+    )
+
+    # 13e. extract_candidates dispatches correctly by backend
+    check("extract_candidates uses structured parsing for backend='gemini'", len(appmod.extract_candidates(gemini_json_text, students_for_ocr, "gemini")) == 2)
+    check("extract_candidates falls back to line parsing if Gemini text wasn't JSON", len(appmod.extract_candidates("Rohan Gupta", students_for_ocr, "gemini")) == 1)
+    check("extract_candidates uses line parsing for backend='tesseract'", len(appmod.extract_candidates("Rohan Gupta", students_for_ocr, "tesseract")) == 1)
+    check("extract_candidates returns nothing for empty text", appmod.extract_candidates("", students_for_ocr, "gemini") == [])
 
     # 14. Repeat-offender aggregation math sanity check
     # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.

@@ -12,6 +12,7 @@
     <div class="field"><label>Class</label><input type="text" name="klass" placeholder="e.g. 9"></div>
     <div class="field"><label>Section</label><input type="text" name="section" placeholder="e.g. A"></div>
     <div class="field"><label>Roll no.</label><input type="text" name="roll"></div>
+    <div class="field"><label>House</label><input type="text" name="house" placeholder="e.g. Red"></div>
     <div class="field span2"><button class="btn btn-primary" type="submit">Add student</button></div>
   </form>
 </div>
@@ -21,7 +22,7 @@
   <form method="post">
     <input type="hidden" name="action" value="edit_all">
     <table>
-      <thead><tr><th>ID</th><th>Name</th><th>Class</th><th>Section</th><th>Roll</th></tr></thead>
+      <thead><tr><th>ID</th><th>Name</th><th>Class</th><th>Section</th><th>Roll</th><th>House</th></tr></thead>
       <tbody>
         {% for s in students %}
         <tr>
@@ -30,6 +31,7 @@
           <td><input type="text" name="klass" value="{{ s['class'] }}" style="width: 60px;"></td>
           <td><input type="text" name="section" value="{{ s.section }}" style="width: 60px;"></td>
           <td><input type="text" name="roll" value="{{ s.roll }}" style="width: 60px;"></td>
+          <td><input type="text" name="house" value="{{ s.house }}" style="width: 80px;"></td>
         </tr>
         {% endfor %}
       </tbody>

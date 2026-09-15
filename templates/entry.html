@@ -67,7 +67,7 @@
 <script>
   attachAutocomplete(document.getElementById('name-input'), document.getElementById('name-list'), {
     onSelect: function (s) {
-      document.getElementById('name-meta').textContent = 'Class ' + (s.class || '?') + (s.section ? '-' + s.section : '') + ' | Roll ' + (s.roll || '?');
+      document.getElementById('name-meta').textContent = 'Class ' + (s.class || '?') + (s.section ? '-' + s.section : '') + ' | Roll ' + (s.roll || '?') + ' | House ' + (s.house || '?');
     }
   });
 </script>
