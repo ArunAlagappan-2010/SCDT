@@ -95,11 +95,11 @@ def build_master_list(wb):
 
     # A handful of example rows so the dropdowns/autocomplete have something to show.
     examples = [
-        ("STU001", "Aarav Sharma", "9", "A", "1", "Red"),
-        ("STU002", "Diya Patel", "9", "A", "2", "Blue"),
-        ("STU003", "Kabir Singh", "9", "B", "1", "Green"),
-        ("STU004", "Meera Nair", "10", "A", "1", "Yellow"),
-        ("STU005", "Rohan Gupta", "10", "B", "3", "Red"),
+        ("STU001", "Aarav Sharma", "9", "A", "1", "Kailash"),
+        ("STU002", "Diya Patel", "9", "A", "2", "Aravali"),
+        ("STU003", "Kabir Singh", "9", "B", "1", "Nilgiri"),
+        ("STU004", "Meera Nair", "10", "A", "1", "Vindhya"),
+        ("STU005", "Rohan Gupta", "10", "B", "3", "Kailash"),
     ]
     for row in examples:
         ws.append(row)

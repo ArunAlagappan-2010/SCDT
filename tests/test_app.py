@@ -15,6 +15,7 @@ import shutil
 import traceback
 import tempfile
 import io
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,8 +52,8 @@ def check(name, condition, detail=""):
 
 
 def run():
-    initial_summary, _, _, _, _ = appmod.dashboard_data()
-    initial_total = sum(s["total"] for s in initial_summary.values())
+    initial_summary, _ = appmod.dashboard_data()
+    initial_total = sum(s["year"] for s in initial_summary.values())
 
     # 1. Dashboard loads
     r = client.get("/")
@@ -116,9 +117,15 @@ def run():
     rows = appmod.read_log_rows("LateComers", limit=10000)
     check("empty name is rejected (no extra row)", len(rows) == before, f"before={before} after={len(rows)}")
 
-    # 7. Dashboard reflects the new entries
+    # 7. Dashboard reflects the new entries (the simplified dashboard no longer
+    # lists individual names, so check the category's month count instead).
     r = client.get("/")
-    check("dashboard reflects entries", b"Rohan Gupta" in r.data)
+    expected_summary, _ = appmod.dashboard_data()
+    check(
+        "dashboard reflects entries",
+        str(expected_summary["LateComers"]["month"]).encode() in r.data,
+        f"expected LateComers month count {expected_summary['LateComers']['month']} to appear on page",
+    )
 
     # 8. Scan upload path: synthetic printed-text image, exercise OCR or graceful fallback
     from PIL import Image, ImageDraw
@@ -197,7 +204,7 @@ def run():
     check("scan commit row has Source=OCR", len(ocr_rows) == 1 and ocr_rows[0]["Name"] == "Aarav Sharma", str(ocr_rows))
     check(
         "scan commit uses the matched student's real House, not OCR's raw guess",
-        ocr_rows and ocr_rows[0]["House"] == "Red",
+        ocr_rows and ocr_rows[0]["House"] == "Kailash",
         str(ocr_rows),
     )
 
@@ -386,36 +393,49 @@ def run():
         appmod.guess_category_from_text_lines("Red   Rohan Gupta   10\nBlue   Diya Patel   9") is None,
     )
 
-    # 14. Repeat-offender aggregation math sanity check
-    # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.
-    summary, repeat_list, max_month, recent, stats = appmod.dashboard_data()
-    total_entries = sum(s["total"] for s in summary.values())
-    check("dashboard total matches rows written", total_entries == initial_total + 5, f"initial={initial_total} total={total_entries}")
+    # 14. dashboard_data() shape: each category has month/year/months (12 entries)
+    summary, stats = appmod.dashboard_data()
+    total_year_entries = sum(s["year"] for s in summary.values())
+    check("dashboard year total matches rows written", total_year_entries == initial_total + 5, f"initial={initial_total} total={total_year_entries}")
+    check("each category summary has month/year/months", all("month" in s and "year" in s and "months" in s for s in summary.values()))
+    check(
+        "each category's months breakdown covers Jan-Dec",
+        all([m["label"] for m in s["months"]] == appmod.MONTH_NAMES for s in summary.values()),
+    )
+    check(
+        "a category's months breakdown sums to its year total",
+        all(sum(m["count"] for m in s["months"]) == s["year"] for s in summary.values()),
+    )
+    check("stats has max_month/max_year_month", stats["max_month"] >= 0 and stats["max_year_month"] >= 0)
 
-    # 15. New analytics stats are well-formed
-    check("stats has a 14-day trend per category", all(len(stats["trends"][k]) == 14 for k in appmod.CATEGORIES))
-    check("stats trend_max is at least 1", stats["trend_max"] >= 1)
-    check("stats class_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["class_breakdown"]))
-    check("stats house_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["house_breakdown"]))
-    check("stats source percentages add up sensibly", 0 <= stats["source_manual_pct"] <= 100 and 0 <= stats["source_ocr_pct"] <= 100)
-    check("stats overall_trend has 14 days", len(stats["overall_trend"]) == 14)
-    check("stats overall_month_total matches sum of category months", stats["overall_month_total"] == sum(s["month"] for s in summary.values()))
-    check("stats top_student is the same as repeat_list[0]", stats["top_student"] == (repeat_list[0] if repeat_list else None))
-    check("stats weekday_breakdown covers all 7 days in Mon-Sun order", [w["label"] for w in stats["weekday_breakdown"]] == ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
-    check("stats weekday_breakdown total matches total entries", sum(w["count"] for w in stats["weekday_breakdown"]) == total_entries, f"weekday sum vs total_entries")
-    if stats["busiest_day"]:
-        check("stats busiest_day is actually the max", stats["busiest_day"]["count"] == max(w["count"] for w in stats["weekday_breakdown"]))
+    # 15. House breakdown is well-formed
+    check("stats house_breakdown is a list of label/count dicts", all("label" in h and "count" in h for h in stats["house_breakdown"]))
 
-    # 16. Gauge geometry: needle lands at the correct endpoints/midpoint of a
-    # semicircle sweeping from left (0) to right (100) over the top.
-    g0 = appmod.gauge_geometry(0, cx=100, cy=100, r=70)
-    check("gauge at 0 points left", abs(g0["needle_x"] - 30) < 0.5 and abs(g0["needle_y"] - 100) < 0.5, str(g0))
-    g100 = appmod.gauge_geometry(100, cx=100, cy=100, r=70)
-    check("gauge at 100 points right", abs(g100["needle_x"] - 170) < 0.5 and abs(g100["needle_y"] - 100) < 0.5, str(g100))
-    g50 = appmod.gauge_geometry(50, cx=100, cy=100, r=70)
-    check("gauge at 50 points straight up", abs(g50["needle_x"] - 100) < 0.5 and abs(g50["needle_y"] - 30) < 0.5, str(g50))
-    check("gauge clamps values above 100", appmod.gauge_geometry(150)["value"] == 100)
-    check("gauge clamps values below 0", appmod.gauge_geometry(-20)["value"] == 0)
+    # 16. Weekly repeat-flag logic (3+ times in the same ISO week) -- built on
+    # synthetic data anchored via date.fromisocalendar so it's deterministic
+    # regardless of what today's actual date happens to be.
+    week_monday = date.fromisocalendar(2026, 10, 1)
+    d1, d2, d3 = week_monday, week_monday + timedelta(days=1), week_monday + timedelta(days=2)
+    synthetic_rows = {
+        "LateComers": [{"Name": "Test Kid", "Class": "9", "Date": d1}, {"Name": "Test Kid", "Class": "9", "Date": d2}],
+        "Defaulters": [{"Name": "Test Kid", "Class": "9", "Date": d3}],
+        "Uniform": [{"Name": "Only Twice", "Class": "9", "Date": d1}, {"Name": "Only Twice", "Class": "9", "Date": d2}],
+        "NailsHair": [],
+    }
+    flags = appmod.compute_weekly_repeat_flags(synthetic_rows, threshold=3)
+    check("compute_weekly_repeat_flags flags a student with 3 entries in one week", any(f["name"] == "Test Kid" and f["count"] == 3 for f in flags))
+    check("compute_weekly_repeat_flags does not flag a student with only 2 entries in one week", not any(f["name"] == "Only Twice" for f in flags))
+    test_kid_flag = next((f for f in flags if f["name"] == "Test Kid"), None)
+    check(
+        "weekly flag records per-category breakdown",
+        test_kid_flag is not None and test_kid_flag["categories"]["LateComers"] == 2 and test_kid_flag["categories"]["Defaulters"] == 1,
+        str(test_kid_flag),
+    )
+    check("weekly flag has a human week_label", test_kid_flag is not None and test_kid_flag["week_label"].startswith("Week of"))
+
+    chart = appmod.weekly_flag_chart_series(flags, num_weeks=10)
+    check("weekly_flag_chart_series returns num_weeks entries", len(chart) == 10)
+    check("weekly_flag_chart_series entries have label/count", all("label" in c and "count" in c for c in chart))
 
 
 try:

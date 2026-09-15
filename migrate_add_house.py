@@ -94,11 +94,11 @@ def main():
     # (falls back to the built-in example data + a blank House for genuinely
     # new students the old file didn't know about).
     example_house_by_id = {ex[0]: ex[5] for ex in [
-        ("STU001", None, None, None, None, "Red"),
-        ("STU002", None, None, None, None, "Blue"),
-        ("STU003", None, None, None, None, "Green"),
-        ("STU004", None, None, None, None, "Yellow"),
-        ("STU005", None, None, None, None, "Red"),
+        ("STU001", None, None, None, None, "Kailash"),
+        ("STU002", None, None, None, None, "Aravali"),
+        ("STU003", None, None, None, None, "Nilgiri"),
+        ("STU004", None, None, None, None, "Vindhya"),
+        ("STU005", None, None, None, None, "Kailash"),
     ]}
     for r, student in enumerate(old_master_rows, start=2):
         master_ws.cell(row=r, column=1, value=student["StudentID"])

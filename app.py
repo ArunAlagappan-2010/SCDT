@@ -14,7 +14,6 @@ See README.md for full setup (including the Tesseract OCR engine install).
 import os
 import re
 import json
-import math
 import base64
 import difflib
 import threading
@@ -61,28 +60,26 @@ USING_GEMINI = bool(GEMINI_API_KEY)
 # Colors are all drawn from one grey/green family (minimalist palette) --
 # categories are told apart by lightness/shade, not by clashing hues.
 CATEGORIES = {
+    # Monotone palette: every category is a shade of the same dark green
+    # (not a different hue) so the whole app stays grey + dark-green only.
     "LateComers": {
         "label": "Late Comers",
-        "color": "#5B7FA6",
-        "light": "#EAEFF4",
+        "color": "#1E4030",
         "extra_fields": [("Time", "text"), ("Reason", "text")],
     },
     "Defaulters": {
         "label": "Defaulters",
-        "color": "#B15C4A",
-        "light": "#F5EBE8",
+        "color": "#2F6B4F",
         "extra_fields": [("Reason", "text")],
     },
     "Uniform": {
         "label": "Uniform",
-        "color": "#B8873A",
-        "light": "#F4EEE3",
+        "color": "#4F8A6C",
         "extra_fields": [("Issue", "text")],
     },
     "NailsHair": {
         "label": "Nails & Hair",
-        "color": "#8672A8",
-        "light": "#EFECF4",
+        "color": "#7FA893",
         "extra_fields": [("Issue", "text")],
     },
 }
@@ -306,10 +303,92 @@ def count_in_range(rows, start, end):
     return n
 
 
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def top_n(counts, n=8):
+    items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]
+    top_max = max((v for _, v in items), default=0) or 1
+    return [{"label": k, "count": v} for k, v in items], top_max
+
+
+def category_month_breakdown(rows, year):
+    """Jan-Dec counts for one category, for the "whole year" view."""
+    counts = [0] * 12
+    for row in rows:
+        d = row.get("Date")
+        if isinstance(d, datetime):
+            d = d.date()
+        if isinstance(d, date) and d.year == year:
+            counts[d.month - 1] += 1
+    return [{"label": MONTH_NAMES[i], "count": counts[i]} for i in range(12)]
+
+
+def compute_weekly_repeat_flags(all_rows_by_cat, threshold=3):
+    """Flags students who show up `threshold` or more times (across ANY
+    category combined) within the same ISO calendar week."""
+    tally = {}
+    for key, rows in all_rows_by_cat.items():
+        for row in rows:
+            name = (row.get("Name") or "").strip()
+            if not name:
+                continue
+            d = row.get("Date")
+            if isinstance(d, datetime):
+                d = d.date()
+            if not isinstance(d, date):
+                continue
+            iso_year, iso_week, _ = d.isocalendar()
+            k = (name, iso_year, iso_week)
+            entry = tally.setdefault(k, {
+                "name": name,
+                "class": row.get("Class") or "",
+                "iso_year": iso_year,
+                "iso_week": iso_week,
+                "count": 0,
+                "categories": {c: 0 for c in CATEGORIES},
+            })
+            entry["count"] += 1
+            entry["categories"][key] += 1
+
+    flagged = [e for e in tally.values() if e["count"] >= threshold]
+    for e in flagged:
+        e["week_label"] = "Week of " + date.fromisocalendar(e["iso_year"], e["iso_week"], 1).strftime("%d %b")
+    flagged.sort(key=lambda e: (e["iso_year"], e["iso_week"], e["count"]), reverse=True)
+    return flagged
+
+
+def weekly_flag_chart_series(flagged, num_weeks=10):
+    """Bar-chart series: how many distinct students were flagged (3+ times
+    that week) per week, for the most recent `num_weeks` weeks."""
+    today = date.today()
+    weeks = []
+    seen = set()
+    cursor = today
+    while len(weeks) < num_weeks:
+        iso_year, iso_week, _ = cursor.isocalendar()
+        if (iso_year, iso_week) not in seen:
+            seen.add((iso_year, iso_week))
+            weeks.append((iso_year, iso_week))
+        cursor -= timedelta(days=7)
+    weeks.reverse()
+
+    counts = {w: 0 for w in weeks}
+    for e in flagged:
+        wk = (e["iso_year"], e["iso_week"])
+        if wk in counts:
+            counts[wk] += 1
+
+    return [
+        {"label": date.fromisocalendar(iso_year, iso_week, 1).strftime("%d %b"), "count": counts[(iso_year, iso_week)]}
+        for iso_year, iso_week in weeks
+    ]
+
+
 def dashboard_data():
     today = date.today()
-    week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
+    year_start = today.replace(month=1, day=1)
 
     summary = {}
     all_rows_by_cat = {}
@@ -319,156 +398,40 @@ def dashboard_data():
         summary[key] = {
             "label": cfg["label"],
             "color": cfg["color"],
-            "light": cfg["light"],
-            "today": count_in_range(rows, today, today),
-            "week": count_in_range(rows, week_start, today),
             "month": count_in_range(rows, month_start, today),
-            "total": len(rows),
+            "year": count_in_range(rows, year_start, today),
+            "months": category_month_breakdown(rows, today.year),
         }
 
-    # Repeat offenders: tally by name across all four categories.
-    tally = {}
-    for key, rows in all_rows_by_cat.items():
-        for row in rows:
-            name = (row.get("Name") or "").strip()
-            if not name:
-                continue
-            entry = tally.setdefault(name, {"name": name, "class": row.get("Class") or "", "counts": {k: 0 for k in CATEGORIES}})
-            entry["counts"][key] += 1
-    repeat_list = sorted(tally.values(), key=lambda e: sum(e["counts"].values()), reverse=True)
-    for e in repeat_list:
-        e["total"] = sum(e["counts"].values())
-    repeat_list = [e for e in repeat_list if e["total"] > 0][:10]
-
     max_month = max((s["month"] for s in summary.values()), default=0) or 1
+    max_year_month = max(
+        (point["count"] for s in summary.values() for point in s["months"]), default=0
+    ) or 1
 
-    # Overall (all categories combined) this-month vs last-month, for the
-    # big headline number + trend + delta card.
-    last_month_end = month_start - timedelta(days=1)
-    last_month_start = last_month_end.replace(day=1)
-    overall_month_total = sum(s["month"] for s in summary.values())
-    overall_last_month_total = sum(
-        count_in_range(rows, last_month_start, last_month_end) for rows in all_rows_by_cat.values()
-    )
-    overall_month_delta = overall_month_total - overall_last_month_total
-
-    recent = []
-    for key, rows in all_rows_by_cat.items():
-        for row in rows[:15]:
-            recent.append({
-                "category": CATEGORIES[key]["label"],
-                "color": CATEGORIES[key]["color"],
-                "date": row.get("Date"),
-                "name": row.get("Name"),
-                "detail": next((row.get(f[0]) for f in CATEGORIES[key]["extra_fields"] if row.get(f[0])), "") or (row.get("Remarks") or ""),
-                "source": row.get("Source"),
-            })
-    recent.sort(key=lambda r: r["date"] or date.min, reverse=True)
-    recent = recent[:12]
-
-    stats = build_extra_stats(all_rows_by_cat)
-    stats["overall_month_total"] = overall_month_total
-    stats["overall_month_delta"] = overall_month_delta
-    stats["top_student"] = repeat_list[0] if repeat_list else None
-
-    return summary, repeat_list, max_month, recent, stats
-
-
-def build_extra_stats(all_rows_by_cat):
-    """Deeper statistics for the dashboard's expandable analytics panel --
-    computed once here so the main KPI view stays cheap and this only runs
-    when the page is actually requested (the panel itself is revealed on
-    click client-side, but the data still needs to be ready when it opens)."""
-    today = date.today()
-
-    # 14-day trend per category, for a small line/bar chart.
-    days = [today - timedelta(days=i) for i in range(13, -1, -1)]
-    trends = {}
-    for key, rows in all_rows_by_cat.items():
-        counts_by_day = {d: 0 for d in days}
-        for row in rows:
-            d = row.get("Date")
-            if isinstance(d, datetime):
-                d = d.date()
-            if d in counts_by_day:
-                counts_by_day[d] += 1
-        trends[key] = [{"label": d.strftime("%d %b"), "count": counts_by_day[d]} for d in days]
-    trend_max = max((point["count"] for series in trends.values() for point in series), default=0) or 1
-
-    # Class / House / Source / weekday breakdowns across all categories combined.
-    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    class_counts, house_counts, source_counts = {}, {}, {"Manual": 0, "OCR": 0}
-    weekday_counts = {name: 0 for name in weekday_names}
+    house_counts = {}
     for rows in all_rows_by_cat.values():
         for row in rows:
-            klass = (row.get("Class") or "").strip()
-            if klass:
-                class_counts[klass] = class_counts.get(klass, 0) + 1
             house = (row.get("House") or "").strip()
             if house:
                 house_counts[house] = house_counts.get(house, 0) + 1
-            src = row.get("Source")
-            if src in source_counts:
-                source_counts[src] += 1
-            d = row.get("Date")
-            if isinstance(d, datetime):
-                d = d.date()
-            if isinstance(d, date):
-                weekday_counts[weekday_names[d.weekday()]] += 1
-
-    def top_n(counts, n=8):
-        items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]
-        top_max = max((v for _, v in items), default=0) or 1
-        return [{"label": k, "count": v} for k, v in items], top_max
-
-    class_breakdown, class_max = top_n(class_counts)
     house_breakdown, house_max = top_n(house_counts)
-    total_sourced = sum(source_counts.values()) or 1
-    source_ocr_pct = round(source_counts["OCR"] / total_sourced * 100)
 
-    # Weekday breakdown stays in Mon-Sun order (not sorted by count) since the
-    # order itself is the useful information -- e.g. "most late-comers land
-    # on Mondays" is actionable, an alphabetised or ranked list would hide that.
-    weekday_breakdown = [{"label": name, "count": weekday_counts[name]} for name in weekday_names]
-    weekday_max = max((w["count"] for w in weekday_breakdown), default=0) or 1
-    busiest_day = max(weekday_breakdown, key=lambda w: w["count"]) if any(w["count"] for w in weekday_breakdown) else None
+    weekly_flags = compute_weekly_repeat_flags(all_rows_by_cat, threshold=3)
+    weekly_flag_chart = weekly_flag_chart_series(weekly_flags, num_weeks=10)
+    weekly_flag_chart_max = max((w["count"] for w in weekly_flag_chart), default=0) or 1
 
-    # Combined (all categories) trend, for the headline sparkline card.
-    overall_trend = [
-        {"label": days[i].strftime("%d %b"), "count": sum(trends[key][i]["count"] for key in trends)}
-        for i in range(len(days))
-    ]
-    overall_trend_max = max((p["count"] for p in overall_trend), default=0) or 1
-
-    return {
-        "trends": trends,
-        "trend_max": trend_max,
-        "overall_trend": overall_trend,
-        "overall_trend_max": overall_trend_max,
-        "class_breakdown": class_breakdown,
-        "class_max": class_max,
+    stats = {
+        "max_month": max_month,
+        "max_year_month": max_year_month,
         "house_breakdown": house_breakdown,
         "house_max": house_max,
-        "weekday_breakdown": weekday_breakdown,
-        "weekday_max": weekday_max,
-        "busiest_day": busiest_day,
-        "source_counts": source_counts,
-        "source_manual_pct": round(source_counts["Manual"] / total_sourced * 100),
-        "source_ocr_pct": source_ocr_pct,
-        "ocr_gauge": gauge_geometry(source_ocr_pct),
+        "weekly_flags": weekly_flags,
+        "weekly_flag_chart": weekly_flag_chart,
+        "weekly_flag_chart_max": weekly_flag_chart_max,
+        "current_year": today.year,
     }
 
-
-def gauge_geometry(value, cx=100, cy=100, r=70):
-    """Needle endpoint for a 0-100 semicircle gauge (0 = left/180deg, 100 =
-    right/0deg, sweeping over the top), plus the value clamped to [0,100]."""
-    value = max(0, min(100, value))
-    theta = math.pi * (1 - value / 100)
-    return {
-        "value": value,
-        "needle_x": round(cx + r * math.cos(theta), 1),
-        "needle_y": round(cy - r * math.sin(theta), 1),
-    }
+    return summary, stats
 
 
 # ---------------------------------------------------------------------------
@@ -765,14 +728,11 @@ def extract_candidates(raw_text, students, backend):
 
 @app.route("/")
 def dashboard():
-    summary, repeat_list, max_month, recent, stats = dashboard_data()
+    summary, stats = dashboard_data()
     return render_template(
         "dashboard.html",
         categories=CATEGORIES,
         summary=summary,
-        repeat_list=repeat_list,
-        max_month=max_month,
-        recent=recent,
         stats=stats,
         today=date.today(),
     )
