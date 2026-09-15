@@ -63,26 +63,26 @@ USING_GEMINI = bool(GEMINI_API_KEY)
 CATEGORIES = {
     "LateComers": {
         "label": "Late Comers",
-        "color": "#2F6FD6",
-        "light": "#DCE7FA",
+        "color": "#5B7FA6",
+        "light": "#EAEFF4",
         "extra_fields": [("Time", "text"), ("Reason", "text")],
     },
     "Defaulters": {
         "label": "Defaulters",
-        "color": "#E4432D",
-        "light": "#FBDEDA",
+        "color": "#B15C4A",
+        "light": "#F5EBE8",
         "extra_fields": [("Reason", "text")],
     },
     "Uniform": {
         "label": "Uniform",
-        "color": "#F0A202",
-        "light": "#FCEBCB",
+        "color": "#B8873A",
+        "light": "#F4EEE3",
         "extra_fields": [("Issue", "text")],
     },
     "NailsHair": {
         "label": "Nails & Hair",
-        "color": "#9B51E0",
-        "light": "#EEE0F9",
+        "color": "#8672A8",
+        "light": "#EFECF4",
         "extra_fields": [("Issue", "text")],
     },
 }
