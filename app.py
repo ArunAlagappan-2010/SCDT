@@ -14,6 +14,7 @@ See README.md for full setup (including the Tesseract OCR engine install).
 import os
 import re
 import json
+import math
 import base64
 import difflib
 import threading
@@ -341,6 +342,16 @@ def dashboard_data():
 
     max_month = max((s["month"] for s in summary.values()), default=0) or 1
 
+    # Overall (all categories combined) this-month vs last-month, for the
+    # big headline number + trend + delta card.
+    last_month_end = month_start - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    overall_month_total = sum(s["month"] for s in summary.values())
+    overall_last_month_total = sum(
+        count_in_range(rows, last_month_start, last_month_end) for rows in all_rows_by_cat.values()
+    )
+    overall_month_delta = overall_month_total - overall_last_month_total
+
     recent = []
     for key, rows in all_rows_by_cat.items():
         for row in rows[:15]:
@@ -356,6 +367,9 @@ def dashboard_data():
     recent = recent[:12]
 
     stats = build_extra_stats(all_rows_by_cat)
+    stats["overall_month_total"] = overall_month_total
+    stats["overall_month_delta"] = overall_month_delta
+    stats["top_student"] = repeat_list[0] if repeat_list else None
 
     return summary, repeat_list, max_month, recent, stats
 
@@ -403,17 +417,40 @@ def build_extra_stats(all_rows_by_cat):
     class_breakdown, class_max = top_n(class_counts)
     house_breakdown, house_max = top_n(house_counts)
     total_sourced = sum(source_counts.values()) or 1
+    source_ocr_pct = round(source_counts["OCR"] / total_sourced * 100)
+
+    # Combined (all categories) trend, for the headline sparkline card.
+    overall_trend = [
+        {"label": days[i].strftime("%d %b"), "count": sum(trends[key][i]["count"] for key in trends)}
+        for i in range(len(days))
+    ]
+    overall_trend_max = max((p["count"] for p in overall_trend), default=0) or 1
 
     return {
         "trends": trends,
         "trend_max": trend_max,
+        "overall_trend": overall_trend,
+        "overall_trend_max": overall_trend_max,
         "class_breakdown": class_breakdown,
         "class_max": class_max,
         "house_breakdown": house_breakdown,
         "house_max": house_max,
         "source_counts": source_counts,
         "source_manual_pct": round(source_counts["Manual"] / total_sourced * 100),
-        "source_ocr_pct": round(source_counts["OCR"] / total_sourced * 100),
+        "source_ocr_pct": source_ocr_pct,
+        "ocr_gauge": gauge_geometry(source_ocr_pct),
+    }
+
+
+def gauge_geometry(value, cx=100, cy=100, r=70):
+    """Needle endpoint for a 0-100 semicircle gauge (0 = left/180deg, 100 =
+    right/0deg, sweeping over the top), plus the value clamped to [0,100]."""
+    value = max(0, min(100, value))
+    theta = math.pi * (1 - value / 100)
+    return {
+        "value": value,
+        "needle_x": round(cx + r * math.cos(theta), 1),
+        "needle_y": round(cy - r * math.sin(theta), 1),
     }
 
 

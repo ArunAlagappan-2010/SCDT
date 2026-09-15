@@ -4,103 +4,133 @@
 <h1>MCTM Dashboard</h1>
 <p class="subtitle">Discipline &amp; grooming &mdash; live counts as of {{ today.strftime('%d %b %Y') }}, pulled straight from the Excel database.</p>
 
-<div class="kpi-grid">
-  {% for key, cfg in categories.items() %}
-  {% set s = summary[key] %}
-  <div class="kpi-card" style="--cat-color: {{ cfg.color }}">
-    <h3>{{ cfg.label }}</h3>
-    <div class="kpi-total">{{ s.total }}</div>
-    <div class="small-note" style="margin-bottom:8px;">total logged</div>
-    <div class="kpi-row"><span>Today</span><b>{{ s.today }}</b></div>
-    <div class="kpi-row"><span>This week</span><b>{{ s.week }}</b></div>
-    <div class="kpi-row"><span>This month</span><b>{{ s.month }}</b></div>
-    <div class="kpi-actions">
-      <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
-      <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
-    </div>
-    <button type="button" class="trend-toggle" data-target="trend-{{ key }}">
-      <span class="chevron">&#9662;</span> 14-day trend
-    </button>
-    <div class="trend-panel" id="trend-{{ key }}">
-      <div class="sparkline-row">
-        {% for point in stats.trends[key] %}
-        <div class="sparkline-bar" style="--cat-color: {{ cfg.color }}; height: {{ (point.count / stats.trend_max * 100) if stats.trend_max else 2 }}%;" title="{{ point.label }}: {{ point.count }}"></div>
-        {% endfor %}
+<div class="bento-grid">
+
+  <!-- Column 1: this month at a glance -->
+  <div class="bento-col">
+    <div class="bento-col-header">This month</div>
+
+    <div class="bento-card">
+      <h3>All categories</h3>
+      <div class="bento-number">{{ stats.overall_month_total }}</div>
+      <div class="bento-sub">entries this month</div>
+      {% if stats.overall_month_delta != 0 %}
+      <div class="bento-delta {{ 'up' if stats.overall_month_delta > 0 else 'down' }}">
+        {{ '&#9650;' | safe if stats.overall_month_delta > 0 else '&#9660;' | safe }}
+        {{ stats.overall_month_delta | abs }} vs last month
       </div>
-      <div class="small-note" style="display:flex; justify-content:space-between; margin-top:6px;">
-        <span>{{ stats.trends[key][0].label }}</span>
-        <span>{{ stats.trends[key][-1].label }}</span>
-      </div>
-    </div>
-  </div>
-  {% endfor %}
-</div>
-
-<div class="panel">
-  <h2>This month by category</h2>
-  {% for key, cfg in categories.items() %}
-  {% set s = summary[key] %}
-  <div class="bar-row">
-    <span>{{ cfg.label }}</span>
-    <div class="bar-track"><div class="bar-fill" style="width: {{ (s.month / max_month * 100) if max_month else 0 }}%; background: {{ cfg.color }}"></div></div>
-    <span>{{ s.month }}</span>
-  </div>
-  {% endfor %}
-</div>
-
-<div class="analytics-toggle-row">
-  <button type="button" class="btn btn-outline trend-toggle" id="analytics-toggle" data-target="analytics-panel">
-    <span class="chevron">&#9662;</span> View analytics
-  </button>
-</div>
-
-<div class="analytics-panel" id="analytics-panel">
-  <div class="analytics-grid" style="margin-bottom: 18px;">
-    <div class="panel">
-      <h2>By class</h2>
-      {% if stats.class_breakdown %}
-        {% for c in stats.class_breakdown %}
-        <div class="bar-row">
-          <span>Class {{ c.label }}</span>
-          <div class="bar-track"><div class="bar-fill" style="width: {{ (c.count / stats.class_max * 100) if stats.class_max else 0 }}%; background: var(--green);"></div></div>
-          <span>{{ c.count }}</span>
-        </div>
-        {% endfor %}
       {% else %}
-        <p class="small-note">No data yet.</p>
+      <div class="bento-delta small-note">Same as last month</div>
       {% endif %}
+      <div class="bento-line-chart">
+        {% set ns = namespace(points="") %}
+        {% for p in stats.overall_trend %}
+          {% set x = (loop.index0 / 13 * 240) | round(1) %}
+          {% set y = (58 - (p.count / stats.overall_trend_max * 48)) | round(1) %}
+          {% set ns.points = ns.points ~ x|string ~ "," ~ y|string ~ " " %}
+        {% endfor %}
+        <svg viewBox="0 0 240 64" width="100%" height="64" preserveAspectRatio="none">
+          <polyline points="{{ ns.points }}" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="small-note" style="display:flex; justify-content:space-between;">
+          <span>{{ stats.overall_trend[0].label }}</span>
+          <span>{{ stats.overall_trend[-1].label }}</span>
+        </div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>By house</h2>
+
+    <div class="bento-card" style="text-align:center;">
+      <h3>Scan usage</h3>
+      <svg viewBox="0 0 200 115" width="100%" style="max-width:220px; display:block; margin:0 auto;">
+        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="rgba(20,32,26,0.15)" stroke-width="16" stroke-linecap="round" pathLength="100"/>
+        <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--green)" stroke-width="16" stroke-linecap="round" pathLength="100"
+              stroke-dasharray="{{ stats.ocr_gauge.value }} 100"/>
+        <line x1="100" y1="100" x2="{{ stats.ocr_gauge.needle_x }}" y2="{{ stats.ocr_gauge.needle_y }}" stroke="var(--ink-strong)" stroke-width="3.5" stroke-linecap="round"/>
+        <circle cx="100" cy="100" r="7" fill="var(--ink-strong)"/>
+        <text x="20" y="112" font-size="11" fill="var(--muted)">0</text>
+        <text x="170" y="112" font-size="11" fill="var(--muted)">100</text>
+      </svg>
+      <div class="bento-number" style="font-size:26px;">{{ stats.source_ocr_pct }}<span class="unit">%</span></div>
+      <div class="bento-sub">of entries logged via scan</div>
+    </div>
+
+    {% if stats.top_student %}
+    <div class="bento-card">
+      <h3>Most flagged</h3>
+      <div class="bento-number" style="font-size:22px;">{{ stats.top_student.name }}</div>
+      <div class="bento-sub">Class {{ stats.top_student['class'] }} &mdash; {{ stats.top_student.total }} total {{ 'flag' if stats.top_student.total == 1 else 'flags' }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Column 2: per category -->
+  <div class="bento-col">
+    <div class="bento-col-header">By category</div>
+    {% for key, cfg in categories.items() %}
+    {% set s = summary[key] %}
+    <div class="bento-card" style="--cat-color: {{ cfg.color }};">
+      <h3>{{ cfg.label }}</h3>
+      <div class="bento-number" style="color: {{ cfg.color }};">{{ s.total }}</div>
+      <div class="bento-sub">{{ s.month }} this month &middot; {{ s.today }} today</div>
+      <div class="bento-mini-bars">
+        {% for p in stats.trends[key] %}
+        <div class="bar" style="height: {{ (p.count / stats.trend_max * 100) if stats.trend_max else 2 }}%; background: {{ cfg.color }};" title="{{ p.label }}: {{ p.count }}"></div>
+        {% endfor %}
+      </div>
+      <div class="kpi-actions" style="margin-top:12px;">
+        <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
+        <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Column 3: breakdowns -->
+  <div class="bento-col">
+    <div class="bento-col-header">Breakdown</div>
+
+    <div class="bento-card">
+      <h3>By house</h3>
       {% if stats.house_breakdown %}
         {% for h in stats.house_breakdown %}
-        <div class="bar-row">
+        <div class="bento-list-row">
           <span>{{ h.label }}</span>
-          <div class="bar-track"><div class="bar-fill" style="width: {{ (h.count / stats.house_max * 100) if stats.house_max else 0 }}%; background: var(--green);"></div></div>
-          <span>{{ h.count }}</span>
+          <span class="val">{{ h.count }}</span>
+        </div>
+        <div class="bar-track" style="margin-bottom:8px;"><div class="bar-fill" style="width: {{ (h.count / stats.house_max * 100) if stats.house_max else 0 }}%; background: var(--green);"></div></div>
+        {% endfor %}
+      {% else %}
+        <p class="small-note">No data yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="bento-card">
+      <h3>By class</h3>
+      {% if stats.class_breakdown %}
+        {% for c in stats.class_breakdown %}
+        <div class="bento-list-row">
+          <span>Class {{ c.label }}</span>
+          <span class="val">{{ c.count }}</span>
         </div>
         {% endfor %}
       {% else %}
         <p class="small-note">No data yet.</p>
       {% endif %}
     </div>
+
+    <div class="bento-card">
+      <h3>How entries get logged</h3>
+      <div class="stat-strip">
+        <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual</div></div>
+        <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned</div></div>
+      </div>
+      <div class="split-bar">
+        <div style="width: {{ stats.source_manual_pct }}%;"></div>
+        <div style="width: {{ stats.source_ocr_pct }}%;"></div>
+      </div>
+    </div>
   </div>
 
-  <div class="panel">
-    <h2>How entries get logged</h2>
-    <div class="stat-strip">
-      <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual entries</div></div>
-      <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned (OCR)</div></div>
-    </div>
-    <div class="split-bar">
-      <div style="width: {{ stats.source_manual_pct }}%;"></div>
-      <div style="width: {{ stats.source_ocr_pct }}%;"></div>
-    </div>
-    <div class="small-note" style="display:flex; justify-content:space-between; margin-top:6px;">
-      <span>Manual {{ stats.source_manual_pct }}%</span>
-      <span>Scanned {{ stats.source_ocr_pct }}%</span>
-    </div>
-  </div>
 </div>
 
 <div class="panel">
@@ -149,18 +179,4 @@
   <p class="small-note">No entries logged yet.</p>
   {% endif %}
 </div>
-
-<script>
-  document.querySelectorAll('.trend-toggle').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      const target = document.getElementById(btn.dataset.target);
-      if (!target) return;
-      target.classList.toggle('open');
-      btn.classList.toggle('open');
-      if (btn.id === 'analytics-toggle') {
-        btn.lastChild.textContent = target.classList.contains('open') ? ' Hide analytics' : ' View analytics';
-      }
-    });
-  });
-</script>
 {% endblock %}

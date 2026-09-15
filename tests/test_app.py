@@ -398,6 +398,20 @@ def run():
     check("stats class_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["class_breakdown"]))
     check("stats house_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["house_breakdown"]))
     check("stats source percentages add up sensibly", 0 <= stats["source_manual_pct"] <= 100 and 0 <= stats["source_ocr_pct"] <= 100)
+    check("stats overall_trend has 14 days", len(stats["overall_trend"]) == 14)
+    check("stats overall_month_total matches sum of category months", stats["overall_month_total"] == sum(s["month"] for s in summary.values()))
+    check("stats top_student is the same as repeat_list[0]", stats["top_student"] == (repeat_list[0] if repeat_list else None))
+
+    # 16. Gauge geometry: needle lands at the correct endpoints/midpoint of a
+    # semicircle sweeping from left (0) to right (100) over the top.
+    g0 = appmod.gauge_geometry(0, cx=100, cy=100, r=70)
+    check("gauge at 0 points left", abs(g0["needle_x"] - 30) < 0.5 and abs(g0["needle_y"] - 100) < 0.5, str(g0))
+    g100 = appmod.gauge_geometry(100, cx=100, cy=100, r=70)
+    check("gauge at 100 points right", abs(g100["needle_x"] - 170) < 0.5 and abs(g100["needle_y"] - 100) < 0.5, str(g100))
+    g50 = appmod.gauge_geometry(50, cx=100, cy=100, r=70)
+    check("gauge at 50 points straight up", abs(g50["needle_x"] - 100) < 0.5 and abs(g50["needle_y"] - 30) < 0.5, str(g50))
+    check("gauge clamps values above 100", appmod.gauge_geometry(150)["value"] == 100)
+    check("gauge clamps values below 0", appmod.gauge_geometry(-20)["value"] == 0)
 
 
 try:
