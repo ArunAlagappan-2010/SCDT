@@ -355,7 +355,66 @@ def dashboard_data():
     recent.sort(key=lambda r: r["date"] or date.min, reverse=True)
     recent = recent[:12]
 
-    return summary, repeat_list, max_month, recent
+    stats = build_extra_stats(all_rows_by_cat)
+
+    return summary, repeat_list, max_month, recent, stats
+
+
+def build_extra_stats(all_rows_by_cat):
+    """Deeper statistics for the dashboard's expandable analytics panel --
+    computed once here so the main KPI view stays cheap and this only runs
+    when the page is actually requested (the panel itself is revealed on
+    click client-side, but the data still needs to be ready when it opens)."""
+    today = date.today()
+
+    # 14-day trend per category, for a small line/bar chart.
+    days = [today - timedelta(days=i) for i in range(13, -1, -1)]
+    trends = {}
+    for key, rows in all_rows_by_cat.items():
+        counts_by_day = {d: 0 for d in days}
+        for row in rows:
+            d = row.get("Date")
+            if isinstance(d, datetime):
+                d = d.date()
+            if d in counts_by_day:
+                counts_by_day[d] += 1
+        trends[key] = [{"label": d.strftime("%d %b"), "count": counts_by_day[d]} for d in days]
+    trend_max = max((point["count"] for series in trends.values() for point in series), default=0) or 1
+
+    # Class / House / Source breakdowns across all categories combined.
+    class_counts, house_counts, source_counts = {}, {}, {"Manual": 0, "OCR": 0}
+    for rows in all_rows_by_cat.values():
+        for row in rows:
+            klass = (row.get("Class") or "").strip()
+            if klass:
+                class_counts[klass] = class_counts.get(klass, 0) + 1
+            house = (row.get("House") or "").strip()
+            if house:
+                house_counts[house] = house_counts.get(house, 0) + 1
+            src = row.get("Source")
+            if src in source_counts:
+                source_counts[src] += 1
+
+    def top_n(counts, n=8):
+        items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]
+        top_max = max((v for _, v in items), default=0) or 1
+        return [{"label": k, "count": v} for k, v in items], top_max
+
+    class_breakdown, class_max = top_n(class_counts)
+    house_breakdown, house_max = top_n(house_counts)
+    total_sourced = sum(source_counts.values()) or 1
+
+    return {
+        "trends": trends,
+        "trend_max": trend_max,
+        "class_breakdown": class_breakdown,
+        "class_max": class_max,
+        "house_breakdown": house_breakdown,
+        "house_max": house_max,
+        "source_counts": source_counts,
+        "source_manual_pct": round(source_counts["Manual"] / total_sourced * 100),
+        "source_ocr_pct": round(source_counts["OCR"] / total_sourced * 100),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +711,7 @@ def extract_candidates(raw_text, students, backend):
 
 @app.route("/")
 def dashboard():
-    summary, repeat_list, max_month, recent = dashboard_data()
+    summary, repeat_list, max_month, recent, stats = dashboard_data()
     return render_template(
         "dashboard.html",
         categories=CATEGORIES,
@@ -660,6 +719,7 @@ def dashboard():
         repeat_list=repeat_list,
         max_month=max_month,
         recent=recent,
+        stats=stats,
         today=date.today(),
     )
 

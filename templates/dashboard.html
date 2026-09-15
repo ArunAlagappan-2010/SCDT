@@ -18,6 +18,20 @@
       <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
       <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
     </div>
+    <button type="button" class="trend-toggle" data-target="trend-{{ key }}">
+      <span class="chevron">&#9662;</span> 14-day trend
+    </button>
+    <div class="trend-panel" id="trend-{{ key }}">
+      <div class="sparkline-row">
+        {% for point in stats.trends[key] %}
+        <div class="sparkline-bar" style="--cat-color: {{ cfg.color }}; height: {{ (point.count / stats.trend_max * 100) if stats.trend_max else 2 }}%;" title="{{ point.label }}: {{ point.count }}"></div>
+        {% endfor %}
+      </div>
+      <div class="small-note" style="display:flex; justify-content:space-between; margin-top:6px;">
+        <span>{{ stats.trends[key][0].label }}</span>
+        <span>{{ stats.trends[key][-1].label }}</span>
+      </div>
+    </div>
   </div>
   {% endfor %}
 </div>
@@ -32,6 +46,61 @@
     <span>{{ s.month }}</span>
   </div>
   {% endfor %}
+</div>
+
+<div class="analytics-toggle-row">
+  <button type="button" class="btn btn-outline trend-toggle" id="analytics-toggle" data-target="analytics-panel">
+    <span class="chevron">&#9662;</span> View analytics
+  </button>
+</div>
+
+<div class="analytics-panel" id="analytics-panel">
+  <div class="analytics-grid" style="margin-bottom: 18px;">
+    <div class="panel">
+      <h2>By class</h2>
+      {% if stats.class_breakdown %}
+        {% for c in stats.class_breakdown %}
+        <div class="bar-row">
+          <span>Class {{ c.label }}</span>
+          <div class="bar-track"><div class="bar-fill" style="width: {{ (c.count / stats.class_max * 100) if stats.class_max else 0 }}%; background: var(--green);"></div></div>
+          <span>{{ c.count }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="small-note">No data yet.</p>
+      {% endif %}
+    </div>
+    <div class="panel">
+      <h2>By house</h2>
+      {% if stats.house_breakdown %}
+        {% for h in stats.house_breakdown %}
+        <div class="bar-row">
+          <span>{{ h.label }}</span>
+          <div class="bar-track"><div class="bar-fill" style="width: {{ (h.count / stats.house_max * 100) if stats.house_max else 0 }}%; background: var(--green);"></div></div>
+          <span>{{ h.count }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="small-note">No data yet.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>How entries get logged</h2>
+    <div class="stat-strip">
+      <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual entries</div></div>
+      <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned (OCR)</div></div>
+    </div>
+    <div class="split-bar">
+      <div style="width: {{ stats.source_manual_pct }}%;"></div>
+      <div style="width: {{ stats.source_ocr_pct }}%;"></div>
+    </div>
+    <div class="small-note" style="display:flex; justify-content:space-between; margin-top:6px;">
+      <span>Manual {{ stats.source_manual_pct }}%</span>
+      <span>Scanned {{ stats.source_ocr_pct }}%</span>
+    </div>
+  </div>
 </div>
 
 <div class="panel">
@@ -80,4 +149,18 @@
   <p class="small-note">No entries logged yet.</p>
   {% endif %}
 </div>
+
+<script>
+  document.querySelectorAll('.trend-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const target = document.getElementById(btn.dataset.target);
+      if (!target) return;
+      target.classList.toggle('open');
+      btn.classList.toggle('open');
+      if (btn.id === 'analytics-toggle') {
+        btn.lastChild.textContent = target.classList.contains('open') ? ' Hide analytics' : ' View analytics';
+      }
+    });
+  });
+</script>
 {% endblock %}

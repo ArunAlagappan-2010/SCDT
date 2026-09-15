@@ -51,7 +51,7 @@ def check(name, condition, detail=""):
 
 
 def run():
-    initial_summary, _, _, _ = appmod.dashboard_data()
+    initial_summary, _, _, _, _ = appmod.dashboard_data()
     initial_total = sum(s["total"] for s in initial_summary.values())
 
     # 1. Dashboard loads
@@ -174,6 +174,9 @@ def run():
 
     # 9. Scan commit path (independent of what OCR actually produced -- simulates the
     #    human review/correction step, which is the important safety net).
+    # Uses a before/after delta -- the copied fixture may already contain real
+    # OCR entries from live use of the app, not just what this test writes.
+    before_scan_commit = len(appmod.read_log_rows("Uniform", limit=10000))
     r = client.post(
         "/scan/commit",
         data={
@@ -188,9 +191,9 @@ def run():
         follow_redirects=True,
     )
     check("POST /scan/commit succeeds", r.status_code == 200)
-    uniform_rows = appmod.read_log_rows("Uniform", limit=10)
-    check("scan commit saved exactly the checked row", len(uniform_rows) == 2, f"rows={uniform_rows}")
-    ocr_rows = [row for row in uniform_rows if row.get("Source") == "OCR"]
+    uniform_rows = appmod.read_log_rows("Uniform", limit=10000)
+    check("scan commit saved exactly the checked row", len(uniform_rows) == before_scan_commit + 1, f"before={before_scan_commit} rows={uniform_rows}")
+    ocr_rows = [row for row in uniform_rows if row.get("Source") == "OCR" and row.get("LoggedBy") == "Scan-Test"]
     check("scan commit row has Source=OCR", len(ocr_rows) == 1 and ocr_rows[0]["Name"] == "Aarav Sharma", str(ocr_rows))
     check(
         "scan commit uses the matched student's real House, not OCR's raw guess",
@@ -385,9 +388,16 @@ def run():
 
     # 14. Repeat-offender aggregation math sanity check
     # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.
-    summary, repeat_list, max_month, recent = appmod.dashboard_data()
+    summary, repeat_list, max_month, recent, stats = appmod.dashboard_data()
     total_entries = sum(s["total"] for s in summary.values())
     check("dashboard total matches rows written", total_entries == initial_total + 5, f"initial={initial_total} total={total_entries}")
+
+    # 15. New analytics stats are well-formed
+    check("stats has a 14-day trend per category", all(len(stats["trends"][k]) == 14 for k in appmod.CATEGORIES))
+    check("stats trend_max is at least 1", stats["trend_max"] >= 1)
+    check("stats class_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["class_breakdown"]))
+    check("stats house_breakdown is a list of label/count dicts", all("label" in c and "count" in c for c in stats["house_breakdown"]))
+    check("stats source percentages add up sensibly", 0 <= stats["source_manual_pct"] <= 100 and 0 <= stats["source_ocr_pct"] <= 100)
 
 
 try:
