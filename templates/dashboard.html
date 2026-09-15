@@ -106,31 +106,35 @@
       {% endif %}
     </div>
 
-    <div class="bento-subgrid">
-      <div class="bento-card">
-        <h3>By class</h3>
-        {% if stats.class_breakdown %}
-          {% for c in stats.class_breakdown %}
-          <div class="bento-list-row">
-            <span>Class {{ c.label }}</span>
-            <span class="val">{{ c.count }}</span>
-          </div>
-          {% endfor %}
-        {% else %}
-          <p class="small-note">No data yet.</p>
-        {% endif %}
-      </div>
+    <div class="bento-card">
+      <h3>By class</h3>
+      {% if stats.class_breakdown %}
+        {% for c in stats.class_breakdown %}
+        <div class="bento-list-row">
+          <span>Class {{ c.label }}</span>
+          <span class="val">{{ c.count }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="small-note">No data yet.</p>
+      {% endif %}
+    </div>
 
-      <div class="bento-card">
-        <h3>Logged how</h3>
-        <div class="stat-strip">
-          <div class="stat-block"><div class="num">{{ stats.source_counts.Manual }}</div><div class="lbl">Manual</div></div>
-          <div class="stat-block"><div class="num">{{ stats.source_counts.OCR }}</div><div class="lbl">Scanned</div></div>
-        </div>
-        <div class="split-bar">
-          <div style="width: {{ stats.source_manual_pct }}%;"></div>
-          <div style="width: {{ stats.source_ocr_pct }}%;"></div>
-        </div>
+    <div class="bento-card">
+      <h3>Busiest day</h3>
+      {% if stats.busiest_day %}
+      <div class="bento-number bento-number--sm">{{ stats.busiest_day.label }}</div>
+      <div class="bento-sub">{{ stats.busiest_day.count }} total entries land on this day</div>
+      {% else %}
+      <div class="bento-sub">No data yet.</div>
+      {% endif %}
+      <div class="bento-mini-bars">
+        {% for w in stats.weekday_breakdown %}
+        <div class="bar" style="height: {{ (w.count / stats.weekday_max * 100) if stats.weekday_max else 2 }}%; background: var(--green);" title="{{ w.label }}: {{ w.count }}"></div>
+        {% endfor %}
+      </div>
+      <div class="small-note" style="display:flex; justify-content:space-between;">
+        <span>Mon</span><span>Sun</span>
       </div>
     </div>
   </div>

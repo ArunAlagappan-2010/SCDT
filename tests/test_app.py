@@ -401,6 +401,10 @@ def run():
     check("stats overall_trend has 14 days", len(stats["overall_trend"]) == 14)
     check("stats overall_month_total matches sum of category months", stats["overall_month_total"] == sum(s["month"] for s in summary.values()))
     check("stats top_student is the same as repeat_list[0]", stats["top_student"] == (repeat_list[0] if repeat_list else None))
+    check("stats weekday_breakdown covers all 7 days in Mon-Sun order", [w["label"] for w in stats["weekday_breakdown"]] == ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+    check("stats weekday_breakdown total matches total entries", sum(w["count"] for w in stats["weekday_breakdown"]) == total_entries, f"weekday sum vs total_entries")
+    if stats["busiest_day"]:
+        check("stats busiest_day is actually the max", stats["busiest_day"]["count"] == max(w["count"] for w in stats["weekday_breakdown"]))
 
     # 16. Gauge geometry: needle lands at the correct endpoints/midpoint of a
     # semicircle sweeping from left (0) to right (100) over the top.

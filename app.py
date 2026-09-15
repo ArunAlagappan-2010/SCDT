@@ -395,8 +395,10 @@ def build_extra_stats(all_rows_by_cat):
         trends[key] = [{"label": d.strftime("%d %b"), "count": counts_by_day[d]} for d in days]
     trend_max = max((point["count"] for series in trends.values() for point in series), default=0) or 1
 
-    # Class / House / Source breakdowns across all categories combined.
+    # Class / House / Source / weekday breakdowns across all categories combined.
+    weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     class_counts, house_counts, source_counts = {}, {}, {"Manual": 0, "OCR": 0}
+    weekday_counts = {name: 0 for name in weekday_names}
     for rows in all_rows_by_cat.values():
         for row in rows:
             klass = (row.get("Class") or "").strip()
@@ -408,6 +410,11 @@ def build_extra_stats(all_rows_by_cat):
             src = row.get("Source")
             if src in source_counts:
                 source_counts[src] += 1
+            d = row.get("Date")
+            if isinstance(d, datetime):
+                d = d.date()
+            if isinstance(d, date):
+                weekday_counts[weekday_names[d.weekday()]] += 1
 
     def top_n(counts, n=8):
         items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]
@@ -418,6 +425,13 @@ def build_extra_stats(all_rows_by_cat):
     house_breakdown, house_max = top_n(house_counts)
     total_sourced = sum(source_counts.values()) or 1
     source_ocr_pct = round(source_counts["OCR"] / total_sourced * 100)
+
+    # Weekday breakdown stays in Mon-Sun order (not sorted by count) since the
+    # order itself is the useful information -- e.g. "most late-comers land
+    # on Mondays" is actionable, an alphabetised or ranked list would hide that.
+    weekday_breakdown = [{"label": name, "count": weekday_counts[name]} for name in weekday_names]
+    weekday_max = max((w["count"] for w in weekday_breakdown), default=0) or 1
+    busiest_day = max(weekday_breakdown, key=lambda w: w["count"]) if any(w["count"] for w in weekday_breakdown) else None
 
     # Combined (all categories) trend, for the headline sparkline card.
     overall_trend = [
@@ -435,6 +449,9 @@ def build_extra_stats(all_rows_by_cat):
         "class_max": class_max,
         "house_breakdown": house_breakdown,
         "house_max": house_max,
+        "weekday_breakdown": weekday_breakdown,
+        "weekday_max": weekday_max,
+        "busiest_day": busiest_day,
         "source_counts": source_counts,
         "source_manual_pct": round(source_counts["Manual"] / total_sourced * 100),
         "source_ocr_pct": source_ocr_pct,
