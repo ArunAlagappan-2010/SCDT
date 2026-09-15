@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Discipline & Grooming Dashboard</h1>
-<p class="subtitle">Live counts as of {{ today.strftime('%d %b %Y') }} &mdash; pulled straight from the Excel database.</p>
+<h1>MCTM Dashboard</h1>
+<p class="subtitle">Discipline &amp; grooming &mdash; live counts as of {{ today.strftime('%d %b %Y') }}, pulled straight from the Excel database.</p>
 
 <div class="kpi-grid">
   {% for key, cfg in categories.items() %}
@@ -16,7 +16,7 @@
     <div class="kpi-row"><span>This month</span><b>{{ s.month }}</b></div>
     <div class="kpi-actions">
       <a class="btn btn-cat" style="background: {{ cfg.color }}" href="{{ url_for('entry', key=key) }}">Log entry</a>
-      <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Scan</a>
+      <a class="btn btn-outline" href="{{ url_for('scan', hint=key) }}">Scan</a>
     </div>
   </div>
   {% endfor %}

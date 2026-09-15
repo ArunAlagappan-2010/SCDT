@@ -57,7 +57,7 @@ def run():
     # 1. Dashboard loads
     r = client.get("/")
     check("dashboard loads (200)", r.status_code == 200)
-    check("dashboard shows title", b"Discipline &amp; Grooming Dashboard" in r.data or b"Discipline & Grooming Dashboard" in r.data)
+    check("dashboard shows title", b"MCTM Dashboard" in r.data)
 
     # 2. Student search API
     r = client.get("/api/students?q=")
@@ -76,12 +76,18 @@ def run():
     r = client.get("/entry/NotACategory")
     check("unknown category -> 404", r.status_code == 404)
 
-    # 4. Entry pages load for every category
+    # 4. Entry pages load for every category; the unified scan page loads
+    # (optionally hinting a category, which it should accept without error).
     for key in appmod.CATEGORIES:
         r = client.get(f"/entry/{key}")
         check(f"GET /entry/{key} loads", r.status_code == 200)
-        r = client.get(f"/scan/{key}")
-        check(f"GET /scan/{key} loads", r.status_code == 200)
+
+    r = client.get("/scan")
+    check("GET /scan loads", r.status_code == 200)
+    r = client.get("/scan?hint=Uniform")
+    check("GET /scan?hint=Uniform loads", r.status_code == 200)
+    r = client.get("/scan?hint=NotARealCategory")
+    check("GET /scan with a bogus hint doesn't error", r.status_code == 200)
 
     # 5. Manual entry submission for each category, verifying category-specific fields.
     # Uses before/after deltas so this doesn't assume a pristine fixture.
@@ -125,11 +131,12 @@ def run():
     buf.seek(0)
 
     r = client.post(
-        "/scan/Uniform",
-        data={"photo": (buf, "test_register.png")},
+        "/scan",
+        data={"photo": (buf, "test_register.png"), "hint": "Uniform"},
         content_type="multipart/form-data",
     )
-    check("POST /scan/<key> with image returns 200", r.status_code == 200)
+    check("POST /scan with image returns 200", r.status_code == 200)
+    check("scan review falls back to the hint when the title can't be detected", b'value="Uniform"' in r.data, r.data[:2000])
 
     def tesseract_binary_available():
         if not appmod.OCR_AVAILABLE:
@@ -150,22 +157,37 @@ def run():
     else:
         check("scan review shows OCR-unavailable warning when engine missing", b"OCR could not run" in r.data or b"No text was detected" in r.data)
 
+    # 8b. Scan commit with no category chosen should be rejected, not silently
+    # filed somewhere -- this is the safety net for the "which register is
+    # this" step that replaced always-know-the-category-first navigation.
+    before_commit_without_category = len(appmod.read_log_rows("Uniform", limit=10000))
+    r = client.post(
+        "/scan/commit",
+        data={"category": "", "row_name": ["Aarav Sharma"], "row_include": ["0"]},
+        follow_redirects=True,
+    )
+    check("scan commit without a category doesn't crash", r.status_code == 200)
+    check(
+        "scan commit without a category doesn't write anything",
+        len(appmod.read_log_rows("Uniform", limit=10000)) == before_commit_without_category,
+    )
+
     # 9. Scan commit path (independent of what OCR actually produced -- simulates the
     #    human review/correction step, which is the important safety net).
     r = client.post(
-        "/scan/Uniform/commit",
+        "/scan/commit",
         data={
+            "category": "Uniform",
             "row_name": ["Aarav Sharma", "Diya Patel"],
             "row_house": ["Wrong Guess", ""],  # OCR's raw guess -- matched student's real House should win
             "row_class": ["9", ""],
             "row_include": ["0"],  # only the first row is checked
-            "row_Issue": ["Shoes", "Blazer"],
             "row_remarks": ["", ""],
             "logged_by": "Scan-Test",
         },
         follow_redirects=True,
     )
-    check("POST /scan/<key>/commit succeeds", r.status_code == 200)
+    check("POST /scan/commit succeeds", r.status_code == 200)
     uniform_rows = appmod.read_log_rows("Uniform", limit=10)
     check("scan commit saved exactly the checked row", len(uniform_rows) == 2, f"rows={uniform_rows}")
     ocr_rows = [row for row in uniform_rows if row.get("Source") == "OCR"]
@@ -315,11 +337,51 @@ def run():
         str(tesseract_lines),
     )
 
-    # 13e. extract_candidates dispatches correctly by backend
-    check("extract_candidates uses structured parsing for backend='gemini'", len(appmod.extract_candidates(gemini_json_text, students_for_ocr, "gemini")) == 2)
-    check("extract_candidates falls back to line parsing if Gemini text wasn't JSON", len(appmod.extract_candidates("Rohan Gupta", students_for_ocr, "gemini")) == 1)
-    check("extract_candidates uses line parsing for backend='tesseract'", len(appmod.extract_candidates("Rohan Gupta", students_for_ocr, "tesseract")) == 1)
-    check("extract_candidates returns nothing for empty text", appmod.extract_candidates("", students_for_ocr, "gemini") == [])
+    # 13e. extract_candidates dispatches correctly by backend, and returns
+    # (candidates, category_guess) now that scanning is a single unified flow.
+    cands, cat_guess = appmod.extract_candidates(gemini_json_text, students_for_ocr, "gemini")
+    check("extract_candidates uses structured parsing for backend='gemini'", len(cands) == 2)
+    check("extract_candidates has no category guess for a bare array (no category_guess key)", cat_guess is None)
+
+    cands, cat_guess = appmod.extract_candidates("Rohan Gupta", students_for_ocr, "gemini")
+    check("extract_candidates falls back to line parsing if Gemini text wasn't JSON", len(cands) == 1)
+
+    cands, cat_guess = appmod.extract_candidates("Rohan Gupta", students_for_ocr, "tesseract")
+    check("extract_candidates uses line parsing for backend='tesseract'", len(cands) == 1)
+
+    cands, cat_guess = appmod.extract_candidates("", students_for_ocr, "gemini")
+    check("extract_candidates returns nothing for empty text", cands == [] and cat_guess is None)
+
+    # 13f. The actual feature: detecting which register a scan belongs to
+    # from its title, so the user doesn't have to navigate there first.
+    check("match_category_label matches an exact label", appmod.match_category_label("Uniform") == "Uniform")
+    check("match_category_label matches a category key directly", appmod.match_category_label("NailsHair") == "NailsHair")
+    check("match_category_label is case-insensitive", appmod.match_category_label("late comers") == "LateComers")
+    check("match_category_label is tolerant of near misses", appmod.match_category_label("Defaultrs") == "Defaulters")
+    check("match_category_label returns None for unrelated text", appmod.match_category_label("Rohan Gupta") is None)
+    check("match_category_label returns None for empty text", appmod.match_category_label("") is None)
+
+    object_shape_text = (
+        '{"category_guess": "Uniform", "rows": ['
+        '{"house": "House", "name": "Name", "class": "Class"},'
+        '{"house": "Red", "name": "Rohan Gupta", "class": "10"}]}'
+    )
+    cat_text, rows = appmod.parse_gemini_extraction(object_shape_text)
+    check("parse_gemini_extraction reads category_guess from the object shape", cat_text == "Uniform")
+    check("parse_gemini_extraction still extracts rows from the object shape", rows is not None and len(rows) == 2)
+
+    cands, cat_guess = appmod.extract_candidates(object_shape_text, students_for_ocr, "gemini")
+    check("extract_candidates surfaces the detected category from Gemini's guess", cat_guess == "Uniform")
+    check("extract_candidates still drops the header row in the object shape", len(cands) == 1, str(cands))
+
+    check(
+        "guess_category_from_text_lines finds a title among the first lines (Tesseract path)",
+        appmod.guess_category_from_text_lines("UNIFORM REGISTER\nRed   Rohan Gupta   10") == "Uniform",
+    )
+    check(
+        "guess_category_from_text_lines returns None when no title is present",
+        appmod.guess_category_from_text_lines("Red   Rohan Gupta   10\nBlue   Diya Patel   9") is None,
+    )
 
     # 14. Repeat-offender aggregation math sanity check
     # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.

@@ -54,50 +54,65 @@ except ImportError:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
-GEMINI_OCR_PROMPT = (
-    "This is a photo of a handwritten or printed school register page with "
-    "columns including House, Name, and Class (there may be other columns too "
-    "-- ignore those). For every row that is an actual student entry, extract "
-    "its House, Name, and Class. "
-    "Do NOT include the header/title row -- that is the row that just repeats "
-    "the column labels themselves (words like \"House\", \"Name\", \"Class\", "
-    "\"Section\", \"Roll\", \"S.No\", \"Date\" etc used as headings, not as a "
-    "real student's data) -- skip it entirely, it is not a student. "
-    "If a value is missing or unreadable for a real row, use an empty string "
-    "for that field, but still include the row if at least the name is readable. "
-    "Respond with ONLY a raw JSON array, no markdown code fences, no commentary, "
-    "in exactly this shape: "
-    '[{"house": "...", "name": "...", "class": "..."}, ...]'
-)
 USING_GEMINI = bool(GEMINI_API_KEY)
 
 # Must match the column order build_excel_template.py wrote into each sheet.
+# Colors are all drawn from one grey/green family (minimalist palette) --
+# categories are told apart by lightness/shade, not by clashing hues.
 CATEGORIES = {
     "LateComers": {
         "label": "Late Comers",
-        "color": "#2F5C8A",
-        "light": "#DCE6F1",
+        "color": "#5B6B63",
+        "light": "#E7EBE8",
         "extra_fields": [("Time", "text"), ("Reason", "text")],
     },
     "Defaulters": {
         "label": "Defaulters",
-        "color": "#C0392B",
-        "light": "#FADBD8",
+        "color": "#2F6B4F",
+        "light": "#DCEBE3",
         "extra_fields": [("Reason", "text")],
     },
     "Uniform": {
         "label": "Uniform",
-        "color": "#D68910",
-        "light": "#FDEBD0",
+        "color": "#3F8F63",
+        "light": "#E1F0E6",
         "extra_fields": [("Issue", "text")],
     },
     "NailsHair": {
         "label": "Nails & Hair",
-        "color": "#1E8449",
-        "light": "#D5F5E3",
+        "color": "#7FA88F",
+        "light": "#EDF4EF",
         "extra_fields": [("Issue", "text")],
     },
 }
+
+CATEGORY_LABELS = [cfg["label"] for cfg in CATEGORIES.values()]
+
+
+def _gemini_ocr_prompt():
+    labels = ", ".join(f'"{cfg["label"]}"' for cfg in CATEGORIES.values())
+    return (
+        "This is a photo of a handwritten or printed school register page with "
+        "columns including House, Name, and Class (there may be other columns too "
+        "-- ignore those). "
+        "First, look at the page's title/heading (if there is one) and guess which "
+        f"kind of register this is, from exactly these options: {labels}. If you "
+        "can't tell, use an empty string. "
+        "Then, for every row that is an actual student entry, extract its House, "
+        "Name, and Class. "
+        "Do NOT include the header/title row -- that is the row that just repeats "
+        "the column labels themselves (words like \"House\", \"Name\", \"Class\", "
+        "\"Section\", \"Roll\", \"S.No\", \"Date\" etc used as headings, not as a "
+        "real student's data) -- skip it entirely, it is not a student. "
+        "If a value is missing or unreadable for a real row, use an empty string "
+        "for that field, but still include the row if at least the name is readable. "
+        "Respond with ONLY a raw JSON object, no markdown code fences, no commentary, "
+        "in exactly this shape: "
+        '{"category_guess": "...", "rows": [{"house": "...", "name": "...", "class": "..."}, ...]}'
+    )
+
+
+GEMINI_OCR_PROMPT = _gemini_ocr_prompt()
 
 MAX_LOG_ROWS = 1000
 MAX_MASTER_ROWS = 2000
@@ -480,20 +495,50 @@ def match_name(name, names):
     return matches[0] if matches else None
 
 
-def parse_structured_ocr_json(text):
-    """Parses Gemini's requested [{"house","name","class"}, ...] JSON output.
-    Returns a list of dicts, or None if the text isn't valid JSON in that
-    shape (signals the caller to fall back to plain-text line parsing)."""
+def match_category_label(text):
+    """Fuzzy-matches free text (a page title, or Gemini's category_guess)
+    against the known category labels/keys. Returns a CATEGORIES key, or None."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    label_to_key = {cfg["label"]: key for key, cfg in CATEGORIES.items()}
+    for label, key in label_to_key.items():
+        if text.lower() == label.lower() or text.lower() == key.lower():
+            return key
+    # Case-insensitive fuzzy match: difflib.ratio() is case-sensitive, and a
+    # register title is often ALL CAPS while our labels are Title Case.
+    lower_to_key = {label.lower(): key for label, key in label_to_key.items()}
+    lower_to_key.update({key.lower(): key for key in CATEGORIES})
+    matches = difflib.get_close_matches(text.lower(), list(lower_to_key.keys()), n=1, cutoff=0.6)
+    if not matches:
+        return None
+    return lower_to_key[matches[0]]
+
+
+def parse_gemini_extraction(text):
+    """Parses Gemini's {"category_guess", "rows":[...]} JSON output (also
+    tolerates a bare rows array, for robustness). Returns (category_guess_text,
+    rows) -- rows is None if the text isn't valid JSON in a recognizable shape
+    (signals the caller to fall back to plain-text line parsing)."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
         cleaned = re.sub(r"```\s*$", "", cleaned).strip()
     try:
-        rows = json.loads(cleaned)
+        data = json.loads(cleaned)
     except (ValueError, TypeError):
-        return None
+        return "", None
+
+    if isinstance(data, dict):
+        category_guess = str(data.get("category_guess") or "").strip()
+        rows = data.get("rows")
+    elif isinstance(data, list):
+        category_guess = ""
+        rows = data
+    else:
+        return "", None
     if not isinstance(rows, list):
-        return None
+        return category_guess, None
 
     result = []
     for row in rows:
@@ -504,7 +549,13 @@ def parse_structured_ocr_json(text):
             "name": str(row.get("name") or "").strip(),
             "klass": str(row.get("class") or "").strip(),
         })
-    return result
+    return category_guess, result
+
+
+def parse_structured_ocr_json(text):
+    """Convenience wrapper around parse_gemini_extraction: just the rows."""
+    _, rows = parse_gemini_extraction(text)
+    return rows
 
 
 def build_candidates_from_structured(rows, students):
@@ -566,18 +617,33 @@ def parse_ocr_lines(raw_text, students):
     return candidates
 
 
+def guess_category_from_text_lines(raw_text):
+    """Best-effort register-type detection for the Tesseract (plain text)
+    path: checks the first few lines for something that looks like a title
+    matching one of the known categories (e.g. "UNIFORM REGISTER")."""
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()][:5]
+    for ln in lines:
+        key = match_category_label(ln)
+        if key:
+            return key
+    return None
+
+
 def extract_candidates(raw_text, students, backend):
-    """Turns raw OCR output into review-table candidates, using structured
-    JSON parsing for Gemini and heuristic line parsing for Tesseract."""
+    """Turns raw OCR output into (candidates, category_guess_key), using
+    structured JSON parsing for Gemini and heuristic line parsing for
+    Tesseract. category_guess_key is a CATEGORIES key, or None if the page's
+    register type couldn't be confidently identified from its title."""
     if not raw_text:
-        return []
+        return [], None
     if backend == "gemini":
-        structured = parse_structured_ocr_json(raw_text)
+        category_guess_text, structured = parse_gemini_extraction(raw_text)
         if structured is not None:
-            return build_candidates_from_structured(structured, students)
+            candidates = build_candidates_from_structured(structured, students)
+            return candidates, match_category_label(category_guess_text)
         # Gemini didn't follow the JSON format for some reason -- fall back
         # to treating its output as plain text rather than losing the scan.
-    return parse_ocr_lines(raw_text, students)
+    return parse_ocr_lines(raw_text, students), guess_category_from_text_lines(raw_text)
 
 
 # ---------------------------------------------------------------------------
@@ -635,31 +701,35 @@ def entry(key):
     return render_template("entry.html", key=key, cfg=cfg, categories=CATEGORIES, recent_rows=recent_rows)
 
 
-@app.route("/scan/<key>", methods=["GET", "POST"])
-def scan(key):
-    if key not in CATEGORIES:
-        return "Unknown category", 404
-    cfg = CATEGORIES[key]
-
+@app.route("/scan", methods=["GET", "POST"])
+def scan():
+    # `hint`: which category the user was looking at when they clicked Scan
+    # (e.g. from a dashboard card). Used only as a fallback default if the
+    # photo's own title can't be confidently detected -- detection always
+    # wins when it succeeds, since it reflects the actual photo.
     if request.method == "POST":
         file = request.files.get("photo")
         if not file or file.filename == "":
             flash("Please choose a photo of the register page.", "error")
-            return redirect(url_for("scan", key=key))
+            return redirect(url_for("scan"))
 
-        filename = f"{key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
+        hint_key = request.form.get("hint")
+        hint_key = hint_key if hint_key in CATEGORIES else None
+
+        filename = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
         save_path = os.path.join(UPLOAD_DIR, filename)
         file.save(save_path)
 
         raw_text, error, warning, backend = run_ocr(save_path)
         students = get_master_students()
-        candidates = extract_candidates(raw_text, students, backend)
+        candidates, category_guess = extract_candidates(raw_text, students, backend)
+        detected_key = category_guess or hint_key
 
         return render_template(
             "scan_review.html",
-            key=key,
-            cfg=cfg,
             categories=CATEGORIES,
+            detected_key=detected_key,
+            category_was_detected=bool(category_guess),
             candidates=candidates,
             raw_text=raw_text,
             error=error,
@@ -668,23 +738,25 @@ def scan(key):
             ocr_backend=ocr_backend_label(),
         )
 
+    hint_key = request.args.get("hint")
+    hint_key = hint_key if hint_key in CATEGORIES else ""
     return render_template(
-        "scan.html", key=key, cfg=cfg, categories=CATEGORIES,
+        "scan.html", categories=CATEGORIES, hint_key=hint_key,
         ocr_available=ocr_ready(), ocr_backend=ocr_backend_label(),
     )
 
 
-@app.route("/scan/<key>/commit", methods=["POST"])
-def scan_commit(key):
+@app.route("/scan/commit", methods=["POST"])
+def scan_commit():
+    key = request.form.get("category")
     if key not in CATEGORIES:
-        return "Unknown category", 404
-    cfg = CATEGORIES[key]
+        flash("Please choose which register this scan belongs to before saving.", "error")
+        return redirect(url_for("scan"))
 
     names = request.form.getlist("row_name")
     houses = request.form.getlist("row_house")
     classes = request.form.getlist("row_class")
     includes = request.form.getlist("row_include")  # values are the row indices that were checked
-    extra_lists = {field: request.form.getlist(f"row_{field}") for field, _ in cfg["extra_fields"]}
     remarks_list = request.form.getlist("row_remarks")
     logged_by = request.form.get("logged_by", "").strip()
 
@@ -702,13 +774,10 @@ def scan_commit(key):
             "Class": classes[i].strip() if i < len(classes) else "",
             "Remarks": remarks_list[i] if i < len(remarks_list) else "",
         }
-        for field, _ in cfg["extra_fields"]:
-            lst = extra_lists[field]
-            values[field] = lst[i] if i < len(lst) else ""
         append_log_entry(key, values, logged_by, "OCR")
         saved += 1
 
-    flash(f"Saved {saved} entr{'y' if saved == 1 else 'ies'} from the scan.", "success")
+    flash(f"Saved {saved} entr{'y' if saved == 1 else 'ies'} from the scan into {CATEGORIES[key]['label']}.", "success")
     return redirect(url_for("entry", key=key))
 
 

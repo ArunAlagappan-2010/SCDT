@@ -6,7 +6,7 @@
 
 <div class="tabs">
   <a class="active" href="{{ url_for('entry', key=key) }}">Manual entry</a>
-  <a href="{{ url_for('scan', key=key) }}">Scan register</a>
+  <a href="{{ url_for('scan', hint=key) }}">Scan register</a>
 </div>
 
 <div class="panel">

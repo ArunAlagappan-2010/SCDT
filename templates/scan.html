@@ -1,13 +1,8 @@
 {% extends "base.html" %}
-{% block title %}{{ cfg.label }} - Scan register{% endblock %}
+{% block title %}Scan register{% endblock %}
 {% block content %}
-<h1>{{ cfg.label }}</h1>
-<p class="subtitle">Upload a photo of the handwritten register page. You'll get to review and correct every line before anything is saved.</p>
-
-<div class="tabs">
-  <a href="{{ url_for('entry', key=key) }}">Manual entry</a>
-  <a class="active" href="{{ url_for('scan', key=key) }}">Scan register</a>
-</div>
+<h1>Scan register</h1>
+<p class="subtitle">Upload a photo of any register page &mdash; Late Comers, Defaulters, Uniform, or Nails &amp; Hair. We'll read the page's title to figure out which one it is, so you don't have to pick first.</p>
 
 {% if not ocr_available %}
 <div class="warn-box">
@@ -21,15 +16,16 @@
 <div class="panel">
   <h2>Upload register photo</h2>
   <form method="post" enctype="multipart/form-data" class="form-grid full" id="scan-form">
+    <input type="hidden" name="hint" value="{{ hint_key }}">
     <div class="field">
       <label>Photo (JPEG/PNG) of the register page</label>
       <input type="file" name="photo" accept="image/*" capture="environment" required>
     </div>
     <div class="field">
-      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit" id="scan-submit">Scan &amp; review</button>
+      <button class="btn btn-primary" type="submit" id="scan-submit">Scan &amp; review</button>
     </div>
   </form>
-  <p class="small-note">Tip: flat lighting, no shadows, and the page filling most of the frame gives the best results. Handwriting recognition is never perfect &mdash; you'll correct names on the next screen using the same autocomplete as manual entry.</p>
+  <p class="small-note">Tip: make sure the page's title/heading (e.g. "Uniform") is visible in the photo &mdash; that's what we use to sort it into the right category. Flat lighting and no shadows give the best results. Handwriting recognition is never perfect &mdash; you'll get to fix names and pick the category on the next screen before anything is saved.</p>
 </div>
 
 <script>

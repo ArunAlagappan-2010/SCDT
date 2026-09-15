@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}{{ cfg.label }} - Review scan{% endblock %}
+{% block title %}Review scan{% endblock %}
 {% block content %}
-<h1>{{ cfg.label }} &mdash; review scanned lines</h1>
-<p class="subtitle">OCR read the lines below. Fix any names it got wrong (use the search box), uncheck lines that aren't real entries, then save.</p>
+<h1>Review scanned register</h1>
+<p class="subtitle">Confirm which register this is, fix any names it got wrong (use the search box), uncheck lines that aren't real entries, then save.</p>
 
 {% if error %}
 <div class="warn-box">OCR could not run: {{ error }}</div>
@@ -13,13 +13,28 @@
 
 {% if not candidates %}
 <div class="panel">
-  <p>No text was detected in that photo. Try a clearer, well-lit photo, or use <a href="{{ url_for('entry', key=key) }}">manual entry</a> instead.</p>
-  <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Try another photo</a>
+  <p>No text was detected in that photo. Try a clearer, well-lit photo, or use manual entry from one of the category pages instead.</p>
+  <a class="btn btn-outline" href="{{ url_for('scan') }}">Try another photo</a>
 </div>
 {% else %}
-<form method="post" action="{{ url_for('scan_commit', key=key) }}">
+<form method="post" action="{{ url_for('scan_commit') }}" id="review-form">
   <div class="panel">
-    <div class="form-grid" style="margin-bottom: 10px;">
+    <label style="display:block; margin-bottom: 8px;">Which register is this?</label>
+    <div class="category-picker" id="category-picker">
+      {% for key, cfg in categories.items() %}
+      <button type="button" class="category-pill {{ 'selected' if key == detected_key else '' }}" data-key="{{ key }}" style="--cat-color: {{ cfg.color }}">{{ cfg.label }}</button>
+      {% endfor %}
+    </div>
+    <input type="hidden" name="category" id="category-input" value="{{ detected_key or '' }}">
+    {% if detected_key and category_was_detected %}
+    <p class="small-note" style="margin-top:8px;">Detected from the page's title. Click a different one above if that's wrong.</p>
+    {% elif detected_key %}
+    <p class="small-note" style="margin-top:8px;">Couldn't read a title on the page &mdash; defaulted to what you were looking at. Click a different one above if that's wrong.</p>
+    {% else %}
+    <p class="small-note" style="margin-top:8px; color:#B45309;">Couldn't tell which register this is &mdash; please pick one above.</p>
+    {% endif %}
+
+    <div class="form-grid" style="margin: 16px 0 10px;">
       <div class="field">
         <label>Logged by (staff name)</label>
         <input type="text" name="logged_by" placeholder="e.g. Mrs. Rao">
@@ -33,7 +48,6 @@
           <th>House</th>
           <th>Student name</th>
           <th>Class</th>
-          {% for field, _ in cfg.extra_fields %}<th>{{ field }}</th>{% endfor %}
           <th>Remarks</th>
         </tr>
       </thead>
@@ -50,23 +64,20 @@
             <div class="autocomplete-list row-name-list"></div>
           </td>
           <td><input type="text" class="row-class-input" name="row_class" value="{{ c.guess_class }}" placeholder="Class"></td>
-          {% for field, _ in cfg.extra_fields %}
-          <td><input type="text" name="row_{{ field }}" placeholder="{{ field }}"></td>
-          {% endfor %}
           <td><input type="text" name="row_remarks" placeholder="Remarks"></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
     <div style="margin-top: 16px;">
-      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save checked entries</button>
-      <a class="btn btn-outline" href="{{ url_for('scan', key=key) }}">Discard &amp; rescan</a>
+      <button class="btn btn-primary" type="submit">Save checked entries</button>
+      <a class="btn btn-outline" href="{{ url_for('scan') }}">Discard &amp; rescan</a>
     </div>
   </div>
 </form>
 
 <details class="panel">
-  <summary style="cursor:pointer; font-weight:600; color: var(--navy);">Raw OCR text (for reference)</summary>
+  <summary style="cursor:pointer; font-weight:600; color: var(--ink-strong);">Raw OCR text (for reference)</summary>
   <pre class="raw-text" style="white-space: pre-wrap; margin-top:10px;">{{ raw_text }}</pre>
 </details>
 {% endif %}
@@ -87,6 +98,25 @@
         if (classInput) classInput.value = (s.class || classInput.value) + (s.section ? '-' + s.section : '');
       }
     });
+  });
+
+  const picker = document.getElementById('category-picker');
+  const categoryInput = document.getElementById('category-input');
+  if (picker) {
+    picker.querySelectorAll('.category-pill').forEach(function (pill) {
+      pill.addEventListener('click', function () {
+        picker.querySelectorAll('.category-pill').forEach(function (p) { p.classList.remove('selected'); });
+        pill.classList.add('selected');
+        categoryInput.value = pill.dataset.key;
+      });
+    });
+  }
+
+  document.getElementById('review-form').addEventListener('submit', function (e) {
+    if (!categoryInput.value) {
+      e.preventDefault();
+      alert('Please choose which register this scan belongs to first.');
+    }
   });
 </script>
 {% endblock %}
