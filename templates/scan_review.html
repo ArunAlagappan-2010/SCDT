@@ -5,7 +5,10 @@
 <p class="subtitle">OCR read the lines below. Fix any names it got wrong (use the search box), uncheck lines that aren't real entries, then save.</p>
 
 {% if error %}
-<div class="warn-box">OCR could not run: {{ error }}. See README.md for installing the Tesseract engine.</div>
+<div class="warn-box">OCR could not run: {{ error }}</div>
+{% endif %}
+{% if warning %}
+<div class="notice-box">{{ warning }}</div>
 {% endif %}
 
 {% if not candidates %}

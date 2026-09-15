@@ -31,6 +31,14 @@ appmod.DB_PATH = TEST_DB
 appmod.UPLOAD_DIR = TMP_DIR
 appmod.app.config["TESTING"] = True
 
+# Force the deterministic offline OCR path regardless of whatever real Gemini
+# key is sitting in .env on this machine -- an automated smoke suite should
+# never depend on a live third-party API (slow, and flaky by nature, as
+# Gemini's own "high demand" 500s demonstrate). Gemini-specific logic
+# (parse_gemini_response, the run_ocr fallback) is still covered separately
+# below without making a real network call.
+appmod.USING_GEMINI = False
+
 client = appmod.app.test_client()
 
 results = []
@@ -215,6 +223,36 @@ def run():
     check("parse_gemini_response handles missing steps key", appmod.parse_gemini_response({}) == "")
     non_output_step = {"steps": [{"type": "tool_call", "content": [{"type": "text", "text": "ignored"}]}]}
     check("parse_gemini_response ignores non-model_output steps", appmod.parse_gemini_response(non_output_step) == "")
+
+    # 13b. run_ocr fallback behaviour (Gemini down -> Tesseract picks up the
+    # slack automatically) -- monkeypatched so it's deterministic and makes no
+    # network call, exercising exactly the bug fixed after Gemini returned a
+    # real "high demand" 500 in production.
+    orig_gemini, orig_tesseract = appmod.run_ocr_gemini, appmod.run_ocr_tesseract
+    orig_using_gemini, orig_ocr_available = appmod.USING_GEMINI, appmod.OCR_AVAILABLE
+    try:
+        appmod.USING_GEMINI = True
+        appmod.OCR_AVAILABLE = True
+
+        appmod.run_ocr_gemini = lambda path: ("Gemini text", None)
+        text, error, warning = appmod.run_ocr("fake-path")
+        check("run_ocr uses Gemini text when it succeeds", text == "Gemini text" and error is None and warning is None)
+
+        appmod.run_ocr_gemini = lambda path: ("", "high demand, try again later")
+        appmod.run_ocr_tesseract = lambda path: ("Tesseract fallback text", None)
+        text, error, warning = appmod.run_ocr("fake-path")
+        check("run_ocr falls back to Tesseract when Gemini fails", text == "Tesseract fallback text" and error is None)
+        check("run_ocr surfaces a warning (not a hard error) on fallback", warning is not None and "Tesseract" in warning)
+
+        appmod.run_ocr_gemini = lambda path: ("", "high demand, try again later")
+        appmod.run_ocr_tesseract = lambda path: ("", "tesseract also broken")
+        text, error, warning = appmod.run_ocr("fake-path")
+        check("run_ocr reports a hard error when both backends fail", error is not None and "also failed" in error)
+    finally:
+        appmod.run_ocr_gemini = orig_gemini
+        appmod.run_ocr_tesseract = orig_tesseract
+        appmod.USING_GEMINI = orig_using_gemini
+        appmod.OCR_AVAILABLE = orig_ocr_available
 
     # 14. Repeat-offender aggregation math sanity check
     # 4 manual entries (one per category) + 1 checked row from the scan commit = 5 new rows.

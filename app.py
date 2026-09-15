@@ -333,9 +333,25 @@ def dashboard_data():
 # ---------------------------------------------------------------------------
 
 def run_ocr(image_path):
+    """Returns (text, error, warning). `error` means nothing usable came back.
+    `warning` means it succeeded but via a fallback worth telling the user about."""
     if USING_GEMINI:
-        return run_ocr_gemini(image_path)
-    return run_ocr_tesseract(image_path)
+        text, error = run_ocr_gemini(image_path)
+        if error is None:
+            return text, None, None
+        if OCR_AVAILABLE:
+            fallback_text, fallback_error = run_ocr_tesseract(image_path)
+            if fallback_error is None:
+                warning = (
+                    f"Gemini was unavailable right now ({error}) — used the offline "
+                    "Tesseract engine instead for this scan. Handwriting accuracy will "
+                    "be lower than usual; double-check names carefully below."
+                )
+                return fallback_text, None, warning
+            return "", f"Gemini failed ({error}), and the Tesseract fallback also failed ({fallback_error}).", None
+        return text, error, None
+    text, error = run_ocr_tesseract(image_path)
+    return text, error, None
 
 
 def ocr_ready():
@@ -508,7 +524,7 @@ def scan(key):
         save_path = os.path.join(UPLOAD_DIR, filename)
         file.save(save_path)
 
-        raw_text, error = run_ocr(save_path)
+        raw_text, error, warning = run_ocr(save_path)
         students = get_master_students()
         candidates = parse_ocr_lines(raw_text, students) if raw_text else []
 
@@ -520,6 +536,7 @@ def scan(key):
             candidates=candidates,
             raw_text=raw_text,
             error=error,
+            warning=warning,
             ocr_available=ocr_ready(),
             ocr_backend=ocr_backend_label(),
         )
