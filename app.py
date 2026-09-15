@@ -392,12 +392,16 @@ def run_ocr_gemini(image_path):
                 {"type": "text", "text": GEMINI_OCR_PROMPT},
                 {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
             ],
+            # OCR is a simple extraction task -- skip extended "thinking" for
+            # lower latency and cost (this API can otherwise take 20s+ even on
+            # trivial requests).
+            "generation_config": {"thinking_level": "low"},
         }
         resp = requests.post(
             GEMINI_ENDPOINT,
             headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
             json=payload,
-            timeout=60,
+            timeout=90,
         )
         if resp.status_code != 200:
             return "", f"Gemini API error {resp.status_code}: {resp.text[:300]}"
