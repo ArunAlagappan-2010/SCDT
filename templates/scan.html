@@ -15,7 +15,7 @@
   configured). You can still upload &mdash; the page will show you the upload but no text will be extracted until one is set up. See README.md.
 </div>
 {% else %}
-<p class="small-note" style="margin-bottom:16px;">OCR engine: <b>{{ ocr_backend }}</b>{% if ocr_backend.startswith('Gemini') %} &mdash; typically takes 15&ndash;30 seconds per scan, please wait after clicking{% endif %}</p>
+<p class="small-note" style="margin-bottom:16px;">OCR engine: <b>{{ ocr_backend }}</b>{% if ocr_backend.startswith('Gemini') %} &mdash; typically takes 5&ndash;10 seconds per scan{% endif %}</p>
 {% endif %}
 
 <div class="panel">
@@ -36,7 +36,7 @@
   document.getElementById('scan-form').addEventListener('submit', function () {
     const btn = document.getElementById('scan-submit');
     btn.disabled = true;
-    btn.textContent = 'Processing... this can take up to 30 seconds';
+    btn.textContent = 'Processing... this can take a few seconds';
   });
 </script>
 {% endblock %}

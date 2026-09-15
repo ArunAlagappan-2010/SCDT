@@ -52,7 +52,7 @@ except ImportError:
 # --- OCR backend #2: Gemini (needs internet + a free API key, better on
 # handwriting). Used automatically when GEMINI_API_KEY is set in .env --------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 GEMINI_OCR_PROMPT = (
     "This is a photo of a handwritten or printed school register page with "
@@ -427,15 +427,20 @@ def run_ocr_gemini(image_path):
                 {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
             ],
             # OCR is a simple extraction task -- skip extended "thinking" for
-            # lower latency and cost (this API can otherwise take 20s+ even on
-            # trivial requests).
+            # lower latency and cost. gemini-3.5-flash-lite already has thinking
+            # off by default, but this is a harmless safety net if the model
+            # or its defaults ever change.
             "generation_config": {"thinking_level": "low"},
         }
         resp = requests.post(
             GEMINI_ENDPOINT,
             headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
             json=payload,
-            timeout=90,
+            # flash-lite typically responds in 5-10s; 45s leaves generous
+            # headroom for a slow moment while still failing (and falling
+            # back to Tesseract) well before staff start wondering if it's
+            # frozen.
+            timeout=45,
         )
         if resp.status_code != 200:
             return "", f"Gemini API error {resp.status_code}: {resp.text[:300]}"
