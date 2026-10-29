@@ -52,7 +52,14 @@ except ImportError:
 # --- OCR backend #2: Gemini (needs internet + a free API key, better on
 # handwriting). Used automatically when GEMINI_API_KEY is set in .env --------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-argon").strip()
+# Reading a handwritten table is NOT a simple extraction task -- keeping each
+# row's House/Name/Class lined up is exactly where cheap models fail. Give the
+# model room to think. Set GEMINI_THINKING=low in .env for faster/cheaper
+# scans if your registers are printed or very neat.
+GEMINI_THINKING = os.environ.get("GEMINI_THINKING", "high").strip()
+# A thinking model is slower than flash-lite was; allow for it before giving up.
+GEMINI_TIMEOUT = int(os.environ.get("GEMINI_TIMEOUT", "120"))
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 USING_GEMINI = bool(GEMINI_API_KEY)
 
@@ -90,18 +97,43 @@ CATEGORY_LABELS = [cfg["label"] for cfg in CATEGORIES.values()]
 def _gemini_ocr_prompt():
     labels = ", ".join(f'"{cfg["label"]}"' for cfg in CATEGORIES.values())
     return (
-        "This is a photo of a handwritten or printed school register page with "
-        "columns including House, Name, and Class (there may be other columns too "
-        "-- ignore those). "
+        "This is a photo of a handwritten or printed school register page laid "
+        "out as a TABLE, with columns including House, Name, and Class (there "
+        "may be other columns too -- ignore those). "
         "First, look at the page's title/heading (if there is one) and guess which "
         f"kind of register this is, from exactly these options: {labels}. If you "
         "can't tell, use an empty string. "
         "Then, for every row that is an actual student entry, extract its House, "
         "Name, and Class. "
-        "Do NOT include the header/title row -- that is the row that just repeats "
-        "the column labels themselves (words like \"House\", \"Name\", \"Class\", "
-        "\"Section\", \"Roll\", \"S.No\", \"Date\" etc used as headings, not as a "
-        "real student's data) -- skip it entirely, it is not a student. "
+        "\n\n"
+        "HOW TO READ THE TABLE -- this is the part that matters most:\n"
+        "1. Work out where each column starts and ends horizontally, then read "
+        "the page ROW BY ROW. A value belongs to whichever column it physically "
+        "sits under on the page. Do not assign fields by reading order.\n"
+        "2. NEVER shift a value left or right into a neighbouring column. If a "
+        "cell is empty or unreadable, return an empty string for THAT field and "
+        "keep the other fields in their own columns. A blank House must not "
+        "cause the Name to be reported as the House.\n"
+        "3. House is typically one short word or an abbreviation (often a "
+        "colour, a saint's or founder's name, or a single letter). It is often "
+        "repeated down a block of consecutive rows, or written once with ditto "
+        "marks below -- if a row clearly continues the House above it, repeat "
+        "that House rather than leaving it blank.\n"
+        "4. Name is a person's name, usually two or more words. If a name wraps "
+        "onto a second line within the same row, join it into one name. Never "
+        "split one student's name across two rows.\n"
+        "5. Class looks like a form or grade such as \"9A\", \"XI B\", \"7-C\", "
+        "\"10 Sec B\". If you see something class-shaped sitting in the Name "
+        "column, or a person's name sitting in the Class column, you have "
+        "misaligned the row -- re-read that row's column positions.\n"
+        "6. Do NOT include the header/title row -- that is the row that just "
+        "repeats the column labels themselves (words like \"House\", \"Name\", "
+        "\"Class\", \"Section\", \"Roll\", \"S.No\", \"Date\" etc used as "
+        "headings, not as a real student's data) -- skip it entirely, it is not "
+        "a student. Also skip totals, signature lines and any row with no name.\n"
+        "7. Return the rows in the same top-to-bottom order they appear on the "
+        "page, one JSON object per student row -- never merge two students into "
+        "one row or split one student into two.\n\n"
         "If a value is missing or unreadable for a real row, use an empty string "
         "for that field, but still include the row if at least the name is readable. "
         "Respond with ONLY a raw JSON object, no markdown code fences, no commentary, "
@@ -517,21 +549,19 @@ def run_ocr_gemini(image_path):
                 {"type": "text", "text": GEMINI_OCR_PROMPT},
                 {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
             ],
-            # OCR is a simple extraction task -- skip extended "thinking" for
-            # lower latency and cost. gemini-3.5-flash-lite already has thinking
-            # off by default, but this is a harmless safety net if the model
-            # or its defaults ever change.
-            "generation_config": {"thinking_level": "low"},
+            # Keeping a handwritten table's columns aligned is a reasoning
+            # task, not plain transcription -- thinking materially improves
+            # row segmentation. Tunable via GEMINI_THINKING in .env.
+            "generation_config": {"thinking_level": GEMINI_THINKING},
         }
         resp = requests.post(
             GEMINI_ENDPOINT,
             headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
             json=payload,
-            # flash-lite typically responds in 5-10s; 45s leaves generous
-            # headroom for a slow moment while still failing (and falling
-            # back to Tesseract) well before staff start wondering if it's
-            # frozen.
-            timeout=45,
+            # A thinking model on a dense register page can take a while;
+            # GEMINI_TIMEOUT (default 120s) fails over to Tesseract well
+            # before staff start wondering if it's frozen.
+            timeout=GEMINI_TIMEOUT,
         )
         if resp.status_code != 200:
             return "", f"Gemini API error {resp.status_code}: {resp.text[:300]}"
