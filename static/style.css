@@ -101,12 +101,36 @@ tr:hover td { background: var(--bg); }
 .form-grid.full { grid-template-columns: 1fr; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field.span2 { grid-column: 1 / -1; }
+.form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 920px; }
+.span-all { grid-column: 1 / -1; }
+.form-actions { flex-direction: row; gap: 8px; }
+@media (max-width: 760px) { .form-grid.three { grid-template-columns: 1fr; } }
 label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
-input[type=text], input[type=date], input[type=file], select, textarea {
+input[type=text], input[type=date], input[type=file], input[type=search], select, textarea {
   padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 14px; font-family: inherit;
   background: #fff; color: var(--ink);
 }
-input[type=text]:focus, select:focus, textarea:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(47,107,79,0.1); }
+input[type=text]:focus, input[type=date]:focus, input[type=search]:focus, select:focus, textarea:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(47,107,79,0.1); }
+
+.filter-input { font-size: 13px; font-weight: 400; padding: 7px 10px; width: 240px; max-width: 50%; }
+.table-scroll { overflow-x: auto; max-height: 560px; overflow-y: auto; }
+.table-scroll thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+.muted-cell { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+.row-actions { display: flex; gap: 6px; white-space: nowrap; }
+.row-actions form { margin: 0; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-danger { background: #fff; border-color: var(--border); color: var(--ink); }
+.btn-danger:hover { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+.pattern-list { list-style: none; margin: 0; padding: 0; }
+.pattern-item { display: flex; gap: 12px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.45; }
+.pattern-item:last-child { border-bottom: none; }
+.pattern-mark { flex: 0 0 18px; text-align: center; font-size: 11px; font-weight: 700; color: var(--muted); }
+.pattern-alert { font-weight: 600; color: var(--ink-strong); }
+.pattern-alert .pattern-mark { color: #fff; background: var(--ink-strong); border-radius: 50%; width: 18px; height: 18px; line-height: 18px; font-size: 11px; }
+.pattern-up .pattern-mark { color: var(--ink-strong); }
+.pattern-down .pattern-mark { color: var(--green); }
 textarea { resize: vertical; min-height: 60px; }
 
 .autocomplete-wrap { position: relative; }

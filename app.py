@@ -11,17 +11,20 @@ Run:
 See README.md for full setup (including the Tesseract OCR engine install).
 """
 
+import io
 import os
 import re
 import json
+import time
 import base64
 import difflib
 import threading
-from datetime import datetime, date, timedelta
+from collections import Counter
+from datetime import datetime, date, timedelta, time as clock_time
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, redirect, url_for, jsonify, flash
+from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, send_file
 from openpyxl import load_workbook
 from PIL import Image, ImageOps
 
@@ -52,16 +55,48 @@ except ImportError:
 # --- OCR backend #2: Gemini (needs internet + a free API key, better on
 # handwriting). Used automatically when GEMINI_API_KEY is set in .env --------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-argon").strip()
-# Reading a handwritten table is NOT a simple extraction task -- keeping each
-# row's House/Name/Class lined up is exactly where cheap models fail. Give the
-# model room to think. Set GEMINI_THINKING=low in .env for faster/cheaper
-# scans if your registers are printed or very neat.
-GEMINI_THINKING = os.environ.get("GEMINI_THINKING", "high").strip()
-# A thinking model is slower than flash-lite was; allow for it before giving up.
-GEMINI_TIMEOUT = int(os.environ.get("GEMINI_TIMEOUT", "120"))
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+# Low-end models that work on a FREE key, tried in order after GEMINI_MODEL.
+# Each model has its own rate-limit bucket, so when one runs out of quota the
+# next one usually still has some. (gemini-4-argon is NOT here on purpose: its
+# free-tier limit is 0, so every call is rejected with a 429 that looks like a
+# broken key.)
+GEMINI_FALLBACK_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemma-4-26b-a4b-it",
+]
+
+
+def _gemini_model_chain():
+    """GEMINI_MODELS (comma-separated) replaces the whole chain if set;
+    otherwise it's GEMINI_MODEL followed by the built-in fallbacks."""
+    override = os.environ.get("GEMINI_MODELS", "").strip()
+    names = override.split(",") if override else [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS
+    chain = []
+    for name in names:
+        name = name.strip()
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+GEMINI_MODELS = _gemini_model_chain()
+# "low" keeps token use (and so free-quota use) down; the lite models read a
+# register fine without extended thinking.
+GEMINI_THINKING = os.environ.get("GEMINI_THINKING", "low").strip()
+# Seconds to wait on ONE model, and on the whole chain, before moving on.
+GEMINI_TIMEOUT = int(os.environ.get("GEMINI_TIMEOUT", "45"))
+GEMINI_TOTAL_TIMEOUT = int(os.environ.get("GEMINI_TOTAL_TIMEOUT", "90"))
+# Photos are shrunk to this long-edge size before upload: fewer image tokens
+# per scan, so the free quota stretches further.
+GEMINI_MAX_IMAGE_PX = 1600
+# How long a model is skipped after failing, by failure kind (seconds).
+GEMINI_COOLDOWN_SECONDS = {"quota": 300, "gone": 86400, "busy": 120}
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 USING_GEMINI = bool(GEMINI_API_KEY)
+_gemini_cooldown_until = {}
 
 # Must match the column order build_excel_template.py wrote into each sheet.
 # Colors are all drawn from one grey/green family (minimalist palette) --
@@ -161,12 +196,39 @@ def sheet_columns(key):
 # Workbook helpers
 # ---------------------------------------------------------------------------
 
+class WorkbookLocked(Exception):
+    """The Excel file couldn't be written -- almost always because someone
+    has it open in Excel, which locks it against other writers."""
+
+
 def open_wb():
     if not os.path.exists(DB_PATH):
         raise FileNotFoundError(
             f"Database not found at {DB_PATH}. Run build_excel_template.py first."
         )
     return load_workbook(DB_PATH)
+
+
+def save_wb(wb):
+    try:
+        wb.save(DB_PATH)
+    except PermissionError as exc:
+        raise WorkbookLocked() from exc
+
+
+def parse_entry_date(raw):
+    """Date typed into an entry form (YYYY-MM-DD from <input type=date>).
+    Blank means today. Returns (date, error_message)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return date.today(), None
+    try:
+        d = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None, "That date isn't valid."
+    if d > date.today():
+        return None, "The date can't be in the future."
+    return d, None
 
 
 def get_master_students():
@@ -200,6 +262,38 @@ def find_student_by_name(name, students=None):
     return None
 
 
+def find_student_by_id(student_id, students=None):
+    students = students if students is not None else get_master_students()
+    sid = (student_id or "").strip().lower()
+    if not sid:
+        return None
+    for s in students:
+        if str(s["id"]).strip().lower() == sid:
+            return s
+    return None
+
+
+def resolve_student(name_or_id, student_id="", students=None):
+    """Finds the master-list record for an entry: by an explicit student ID
+    first, then by whatever was typed in the name box -- which may itself be
+    an ID like STU003 -- then by exact name."""
+    students = students if students is not None else get_master_students()
+    return (
+        find_student_by_id(student_id, students)
+        or find_student_by_id(name_or_id, students)
+        or find_student_by_name(name_or_id, students)
+    )
+
+
+def class_label(student):
+    """"10-B" style label from a master-list record."""
+    if not student:
+        return ""
+    klass = str(student.get("class") or "")
+    section = str(student.get("section") or "")
+    return f"{klass}-{section}" if klass and section else klass or section
+
+
 def next_master_row(ws):
     for r in range(2, MAX_MASTER_ROWS + 2):
         if ws.cell(row=r, column=1).value in (None, ""):
@@ -231,7 +325,7 @@ def add_student(name, klass, section, roll, house=""):
         ws.cell(row=r, column=4, value=section)
         ws.cell(row=r, column=5, value=roll)
         ws.cell(row=r, column=6, value=house)
-        wb.save(DB_PATH)
+        save_wb(wb)
         return sid
 
 
@@ -246,7 +340,7 @@ def update_student(student_id, name, klass, section, roll, house=""):
                 ws.cell(row=r, column=4, value=section)
                 ws.cell(row=r, column=5, value=roll)
                 ws.cell(row=r, column=6, value=house)
-                wb.save(DB_PATH)
+                save_wb(wb)
                 return True
         return False
 
@@ -271,37 +365,103 @@ def next_log_entry_id(ws, key):
     return f"{prefix}-{max_num + 1:05d}"
 
 
+def _entry_row_values(key, values_by_header, logged_by, students):
+    """Builds the sheet values for one entry. When the student is found in the
+    master list (by ID or name) the master record is the source of truth for
+    Name/Class/Section/House; otherwise whatever was typed is kept."""
+    match = resolve_student(values_by_header.get("Name", ""), values_by_header.get("StudentID", ""), students)
+    row_values = {
+        "Date": values_by_header.get("Date") or date.today(),
+        "Name": match["name"] if match else values_by_header.get("Name", ""),
+        "Class": match["class"] if match else values_by_header.get("Class", ""),
+        "Section": match["section"] if match else values_by_header.get("Section", ""),
+        "House": match["house"] if match else values_by_header.get("House", ""),
+        "Remarks": values_by_header.get("Remarks", ""),
+        "LoggedBy": logged_by or "",
+    }
+    for field, _ in CATEGORIES[key]["extra_fields"]:
+        row_values[field] = values_by_header.get(field, "")
+    return row_values
+
+
 def append_log_entry(key, values_by_header, logged_by, source):
-    """values_by_header: dict covering Date, Name, <extra fields>, Remarks."""
+    """values_by_header: dict covering Date, Name (or StudentID), <extra fields>, Remarks."""
     cols = sheet_columns(key)
-    students = get_master_students()
-    match = find_student_by_name(values_by_header.get("Name", ""), students)
+    row_values = _entry_row_values(key, values_by_header, logged_by, get_master_students())
 
     with wb_lock:
         wb = open_wb()
         ws = wb[key]
         r = next_log_row(ws)
         entry_id = next_log_entry_id(ws, key)
-
-        row_values = {
-            "EntryID": entry_id,
-            "Date": values_by_header.get("Date") or date.today(),
-            "Name": values_by_header.get("Name", ""),
-            "Class": match["class"] if match else values_by_header.get("Class", ""),
-            "Section": match["section"] if match else values_by_header.get("Section", ""),
-            "House": match["house"] if match else values_by_header.get("House", ""),
-            "Remarks": values_by_header.get("Remarks", ""),
-            "LoggedBy": logged_by or "",
-            "Source": source,
-        }
-        for field, _ in CATEGORIES[key]["extra_fields"]:
-            row_values[field] = values_by_header.get(field, "")
+        row_values["EntryID"] = entry_id
+        row_values["Source"] = source
 
         for c, header in enumerate(cols, start=1):
             ws.cell(row=r, column=c, value=row_values.get(header, ""))
 
-        wb.save(DB_PATH)
+        save_wb(wb)
         return entry_id
+
+
+def _find_log_row(ws, entry_id):
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(row=r, column=1).value == entry_id:
+            return r
+    return None
+
+
+def get_log_entry(key, entry_id):
+    for row in read_log_rows(key, limit=100000):
+        if row.get("EntryID") == entry_id:
+            return row
+    return None
+
+
+def update_log_entry(key, entry_id, values_by_header, logged_by):
+    """Overwrites an existing entry's editable fields (EntryID and Source stay).
+    Returns False if the entry no longer exists."""
+    cols = sheet_columns(key)
+    row_values = _entry_row_values(key, values_by_header, logged_by, get_master_students())
+
+    with wb_lock:
+        wb = open_wb()
+        ws = wb[key]
+        r = _find_log_row(ws, entry_id)
+        if r is None:
+            return False
+        for c, header in enumerate(cols, start=1):
+            if header in ("EntryID", "Source"):
+                continue
+            ws.cell(row=r, column=c).value = row_values.get(header, "")
+        save_wb(wb)
+        return True
+
+
+def delete_log_entry(key, entry_id):
+    """Blanks the entry's row rather than deleting it: openpyxl's
+    delete_rows() doesn't rewrite the per-row VLOOKUP formulas in the rows
+    below, which would leave every later row looking up the wrong name. The
+    blank row is simply reused by the next new entry. Returns False if the
+    entry no longer exists."""
+    cols = sheet_columns(key)
+    with wb_lock:
+        wb = open_wb()
+        ws = wb[key]
+        r = _find_log_row(ws, entry_id)
+        if r is None:
+            return False
+        for c in range(1, len(cols) + 1):
+            # Assign .value directly: ws.cell(..., value=None) is a no-op.
+            ws.cell(row=r, column=c).value = None
+        # Restore the auto-fill formulas the template puts in empty rows, so
+        # picking a name in this row directly in Excel still fills it in.
+        name_ref = f"C{r}"
+        ws.cell(row=r, column=4).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,2,FALSE),"")'
+        ws.cell(row=r, column=5).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,3,FALSE),"")'
+        ws.cell(row=r, column=6).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$F,5,FALSE),"")'
+        save_wb(wb)
+        return True
 
 
 def read_log_rows(key, limit=200):
@@ -417,6 +577,183 @@ def weekly_flag_chart_series(flagged, num_weeks=10):
     ]
 
 
+WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MAX_PATTERNS = 10
+
+
+def _row_date(row):
+    d = row.get("Date")
+    if isinstance(d, datetime):
+        return d.date()
+    return d if isinstance(d, date) else None
+
+
+def _parse_clock_time(value):
+    """Late-comer arrival times are free text ("8:45", "8:45 AM", "9am")."""
+    if isinstance(value, datetime):
+        return value.time()
+    if isinstance(value, clock_time):
+        return value
+    text = str(value or "").strip().upper().replace(".", ":")
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M", "%I %p", "%I%p"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def _row_class_label(row):
+    klass = str(row.get("Class") or "").strip()
+    section = str(row.get("Section") or "").strip()
+    return f"{klass}-{section}" if klass and section else klass or section
+
+
+def _join_names(names, limit=3):
+    shown = list(names)[:limit]
+    extra = len(names) - len(shown)
+    return ", ".join(shown) + (f" and {extra} more" if extra > 0 else "")
+
+
+def build_patterns(all_rows_by_cat, weekly_flags, today):
+    """Plain-language observations about the data, most urgent first. Each is
+    {"text": ..., "tone": "alert" | "up" | "down" | "info"} -- "up" means more
+    incidents (worse), "down" means fewer (better)."""
+    alerts, trends, observations = [], [], []
+
+    # Students already at 3+ entries this week, and students who keep hitting it.
+    this_week = today.isocalendar()[:2]
+    flagged_now = sorted({f["name"] for f in weekly_flags if (f["iso_year"], f["iso_week"]) == this_week})
+    if flagged_now:
+        alerts.append({
+            "text": f"{len(flagged_now)} student{'s are' if len(flagged_now) != 1 else ' is'} already at 3+ entries this week: {_join_names(flagged_now)}.",
+            "tone": "alert",
+        })
+    weeks_per_name = Counter(f["name"] for f in weekly_flags)
+    chronic = [name for name, n in weeks_per_name.most_common() if n >= 2]
+    for name in chronic[:3]:
+        alerts.append({
+            "text": f"{name} has hit 3+ entries in a single week {weeks_per_name[name]} separate times.",
+            "tone": "alert",
+        })
+
+    # This month so far vs the same stretch of last month (day 1 to today's day).
+    month_start = today.replace(day=1)
+    last_month_end = month_start - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    last_month_cutoff = min(last_month_start + timedelta(days=today.day - 1), last_month_end)
+    month_rows = []
+    for key, rows in all_rows_by_cat.items():
+        label = CATEGORIES[key]["label"]
+        this_m = last_m = 0
+        for row in rows:
+            d = _row_date(row)
+            if d is None:
+                continue
+            if month_start <= d <= today:
+                this_m += 1
+                month_rows.append((key, row))
+            elif last_month_start <= d <= last_month_cutoff:
+                last_m += 1
+        if not this_m and not last_m:
+            continue
+        if last_m == 0:
+            trends.append({"text": f"{label}: {this_m} so far this month, none by this point last month.", "tone": "up"})
+        elif this_m == last_m:
+            trends.append({"text": f"{label}: {this_m} so far this month, the same as by this point last month.", "tone": "info"})
+        else:
+            direction = "up" if this_m > last_m else "down"
+            pct = round(abs(this_m - last_m) / last_m * 100)
+            trends.append({
+                "text": f"{label}: {this_m} so far this month, {direction} {pct}% on the {last_m} logged by this point last month.",
+                "tone": direction,
+            })
+
+    # Who and where, this month.
+    month_total = len(month_rows)
+    if month_total:
+        registers_by_name = {}
+        for key, row in month_rows:
+            name = (row.get("Name") or "").strip()
+            if name:
+                registers_by_name.setdefault(name, set()).add(key)
+        multi = sorted(n for n, keys in registers_by_name.items() if len(keys) >= 2)
+        if multi:
+            described = [
+                f"{n} ({', '.join(CATEGORIES[k]['label'] for k in CATEGORIES if k in registers_by_name[n])})"
+                for n in multi
+            ]
+            observations.append({
+                "text": f"{len(multi)} student{'s appear' if len(multi) != 1 else ' appears'} in more than one register this month: {_join_names(described)}.",
+                "tone": "info",
+            })
+
+        per_student = Counter((row.get("Name") or "").strip() for _, row in month_rows if (row.get("Name") or "").strip())
+        if month_total >= 8 and len(per_student) > 3:
+            top3 = sum(n for _, n in per_student.most_common(3))
+            share = round(top3 / month_total * 100)
+            if share >= 30:
+                observations.append({
+                    "text": f"Just 3 students account for {share}% of this month's {month_total} entries.",
+                    "tone": "info",
+                })
+
+        if month_total >= 5:
+            for what, counts in (
+                ("Class", Counter(_row_class_label(row) for _, row in month_rows if _row_class_label(row))),
+                ("House", Counter((row.get("House") or "").strip() for _, row in month_rows if (row.get("House") or "").strip())),
+            ):
+                if len(counts) >= 2:
+                    top, n = counts.most_common(1)[0]
+                    observations.append({
+                        "text": f"{what} {top} has the most entries this month: {n} of {month_total} ({round(n / month_total * 100)}%).",
+                        "tone": "info",
+                    })
+
+    # Habits within each register, across all recorded history.
+    for key, rows in all_rows_by_cat.items():
+        label = CATEGORIES[key]["label"]
+        dated = [d for d in (_row_date(r) for r in rows) if d]
+        if len(dated) >= 6:
+            weekday, n = Counter(d.weekday() for d in dated).most_common(1)[0]
+            if n / len(dated) >= 0.3:
+                observations.append({
+                    "text": f"{label} entries peak on {WEEKDAY_NAMES[weekday]}s: {n} of {len(dated)} ({round(n / len(dated) * 100)}%).",
+                    "tone": "info",
+                })
+
+        if any(field == "Time" for field, _ in CATEGORIES[key]["extra_fields"]):
+            times = [t for t in (_parse_clock_time(r.get("Time")) for r in rows) if t]
+            if len(times) >= 4:
+                slot, n = Counter((t.hour, t.minute // 15 * 15) for t in times).most_common(1)[0]
+                start = datetime.combine(today, clock_time(*slot))
+                end = start + timedelta(minutes=15)
+                observations.append({
+                    "text": f"Most late arrivals are between {start.strftime('%I:%M').lstrip('0')} and {end.strftime('%I:%M %p').lstrip('0')} ({n} of {len(times)} with a time recorded).",
+                    "tone": "info",
+                })
+
+        detail_field = CATEGORIES[key]["extra_fields"][-1][0]
+        if detail_field in ("Reason", "Issue"):
+            originals = {}
+            counts = Counter()
+            for r in rows:
+                text = str(r.get(detail_field) or "").strip()
+                if text and text.lower() not in ("null", "none", "-"):
+                    norm = text.lower()
+                    originals.setdefault(norm, text)
+                    counts[norm] += 1
+            if counts:
+                norm, n = counts.most_common(1)[0]
+                if n >= 2:
+                    observations.append({
+                        "text": f"Most common {label} {detail_field.lower()}: “{originals[norm]}” ({n} times).",
+                        "tone": "info",
+                    })
+
+    return (alerts + trends + observations)[:MAX_PATTERNS]
+
+
 def dashboard_data():
     today = date.today()
     month_start = today.replace(day=1)
@@ -461,6 +798,7 @@ def dashboard_data():
         "weekly_flag_chart": weekly_flag_chart,
         "weekly_flag_chart_max": weekly_flag_chart_max,
         "current_year": today.year,
+        "patterns": build_patterns(all_rows_by_cat, weekly_flags, today),
     }
 
     return summary, stats
@@ -531,49 +869,108 @@ def parse_gemini_response(data):
     return "\n".join(text_parts).strip()
 
 
-def run_ocr_gemini(image_path):
+def _encode_image_for_gemini(image_path):
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    img.thumbnail((GEMINI_MAX_IMAGE_PX, GEMINI_MAX_IMAGE_PX))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _gemini_error_message(resp):
     try:
-        img = Image.open(image_path)
-        img = ImageOps.exif_transpose(img)
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+        message = resp.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        message = resp.text
+    return f"HTTP {resp.status_code}: {str(message)[:160]}"
 
-        import io
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=90)
-        b64_image = base64.b64encode(buf.getvalue()).decode("ascii")
 
-        payload = {
-            "model": GEMINI_MODEL,
-            "input": [
-                {"type": "text", "text": GEMINI_OCR_PROMPT},
-                {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
-            ],
-            # Keeping a handwritten table's columns aligned is a reasoning
-            # task, not plain transcription -- thinking materially improves
-            # row segmentation. Tunable via GEMINI_THINKING in .env.
-            "generation_config": {"thinking_level": GEMINI_THINKING},
-        }
-        resp = requests.post(
-            GEMINI_ENDPOINT,
-            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-            json=payload,
-            # A thinking model on a dense register page can take a while;
-            # GEMINI_TIMEOUT (default 120s) fails over to Tesseract well
-            # before staff start wondering if it's frozen.
-            timeout=GEMINI_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            return "", f"Gemini API error {resp.status_code}: {resp.text[:300]}"
-
-        text = parse_gemini_response(resp.json())
-        if not text:
-            return "", "Gemini returned no text (unexpected response shape)."
-        return text, None
+def _gemini_request(model, b64_image, timeout):
+    """One OCR call to one model. Returns (text, error, kind); `kind` says
+    what to do about a failure:
+      "auth"    the key itself was rejected -- no other model will work either
+      "network" Gemini can't be reached at all -- same
+      "quota"   this model's rate limit is used up -- try the next model
+      "gone"    this model was retired or isn't offered to this key
+      "busy"    overloaded, timed out, or answered with nothing"""
+    payload = {
+        "model": model,
+        "input": [
+            {"type": "text", "text": GEMINI_OCR_PROMPT},
+            {"type": "image", "data": b64_image, "mime_type": "image/jpeg"},
+        ],
+        "generation_config": {"thinking_level": GEMINI_THINKING},
+    }
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    try:
+        resp = requests.post(GEMINI_ENDPOINT, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code == 400 and "thinking" in resp.text.lower():
+            # Some models (the Gemma family) reject thinking_level outright.
+            del payload["generation_config"]
+            resp = requests.post(GEMINI_ENDPOINT, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.Timeout:
+        return "", f"no answer within {int(timeout)}s", "busy"
     except requests.exceptions.RequestException as exc:
-        return "", f"Could not reach Gemini API (check internet connection): {exc}"
+        return "", f"could not reach Gemini (check the internet connection): {str(exc)[:160]}", "network"
+
+    if resp.status_code == 200:
+        try:
+            text = parse_gemini_response(resp.json())
+        except ValueError:
+            text = ""
+        if text:
+            return text, None, None
+        return "", "answered with no text", "busy"
+
+    error = _gemini_error_message(resp)
+    if resp.status_code in (401, 403) or (resp.status_code == 400 and "api key" in resp.text.lower()):
+        return "", error, "auth"
+    if resp.status_code == 429:
+        return "", error, "quota"
+    if resp.status_code == 404:
+        return "", error, "gone"
+    return "", error, "busy"
+
+
+def run_ocr_gemini(image_path):
+    """Tries each model in GEMINI_MODELS until one reads the photo. Models
+    that just failed are skipped for a while (see GEMINI_COOLDOWN_SECONDS) so
+    a dead one doesn't slow down every scan. Returns (text, error)."""
+    try:
+        b64_image = _encode_image_for_gemini(image_path)
     except Exception as exc:
-        return "", f"Gemini OCR failed: {exc}"
+        return "", f"could not read the photo: {exc}"
+
+    now = time.monotonic()
+    candidates = [m for m in GEMINI_MODELS if _gemini_cooldown_until.get(m, 0) <= now]
+    if not candidates:
+        candidates = list(GEMINI_MODELS)  # everything is cooling down -- try them all anyway
+
+    deadline = now + GEMINI_TOTAL_TIMEOUT
+    failures = []
+    for model in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining < 2:
+            failures.append("ran out of time before trying the remaining models")
+            break
+        text, error, kind = _gemini_request(model, b64_image, min(GEMINI_TIMEOUT, remaining))
+        if error is None:
+            _gemini_cooldown_until.pop(model, None)
+            if failures:
+                print(f"[OCR] {model} answered after: {'; '.join(failures)}")
+            return text, None
+        failures.append(f"{model}: {error}")
+        if kind == "auth":
+            return "", f"Gemini rejected the API key ({error}). Check GEMINI_API_KEY in .env"
+        if kind == "network":
+            return "", error
+        _gemini_cooldown_until[model] = time.monotonic() + GEMINI_COOLDOWN_SECONDS.get(kind, 120)
+
+    print(f"[OCR] every Gemini model failed: {'; '.join(failures)}")
+    return "", "no Gemini model could read it — " + "; ".join(failures)
 
 
 # Column-heading words that should never be treated as a student's data --
@@ -664,21 +1061,30 @@ def parse_structured_ocr_json(text):
     return rows
 
 
+def _make_candidate(raw_text, house, name, klass, students):
+    """One review-table row. If the name matches a student in the master
+    list, House/Class/ID come from that record -- what OCR read for those
+    columns is only kept for students it couldn't identify."""
+    best = match_name(name, [s["name"] for s in students])
+    student = find_student_by_name(best, students) if best else None
+    return {
+        "raw_text": raw_text,
+        "guess_house": student["house"] if student else house,
+        "guess_name": best or name,
+        "guess_class": class_label(student) if student else klass,
+        "student_id": student["id"] if student else "",
+        "confident": bool(best),
+    }
+
+
 def build_candidates_from_structured(rows, students):
-    names = [s["name"] for s in students]
     candidates = []
     for row in rows:
         name = row["name"]
         if not name or name.strip().lower() in HEADER_WORDS:
             continue  # no name to work with, or the model slipped in a header row anyway
-        best = match_name(name, names)
-        candidates.append({
-            "raw_text": " / ".join(v for v in (row["house"], name, row["klass"]) if v),
-            "guess_house": row["house"],
-            "guess_name": best or name,
-            "guess_class": row["klass"],
-            "confident": bool(best),
-        })
+        raw_text = " / ".join(v for v in (row["house"], name, row["klass"]) if v)
+        candidates.append(_make_candidate(raw_text, row["house"], name, row["klass"], students))
     return candidates
 
 
@@ -694,7 +1100,6 @@ def parse_ocr_lines(raw_text, students):
     """Heuristic House/Name/Class extraction from plain OCR text (the
     Tesseract path -- Gemini's structured JSON is handled separately, far
     more reliably, by build_candidates_from_structured)."""
-    names = [s["name"] for s in students]
     lines = [ln.strip() for ln in raw_text.splitlines()]
     lines = [re.sub(r"^[\W_]+", "", ln) for ln in lines]  # strip leading bullets/numbers/punct
     lines = [ln for ln in lines if len(ln) >= 2]
@@ -712,14 +1117,7 @@ def parse_ocr_lines(raw_text, students):
         else:
             house, name, klass = "", ln, ""
 
-        best = match_name(name, names)
-        candidates.append({
-            "raw_text": ln,
-            "guess_house": house,
-            "guess_name": best or name,
-            "guess_class": klass,
-            "confident": bool(best),
-        })
+        candidates.append(_make_candidate(ln, house, name, klass, students))
     return candidates
 
 
@@ -768,6 +1166,16 @@ def dashboard():
     )
 
 
+@app.errorhandler(WorkbookLocked)
+def workbook_locked(_exc):
+    flash(
+        "Couldn't save: the Excel file is open somewhere (usually in Excel on the server PC). "
+        "Close it there and try again.",
+        "error",
+    )
+    return redirect(request.referrer or url_for("dashboard"))
+
+
 @app.route("/api/students")
 def api_students():
     q = (request.args.get("q") or "").strip().lower()
@@ -775,10 +1183,73 @@ def api_students():
     if not q:
         results = students[:8]
     else:
-        starts = [s for s in students if s["name"].lower().startswith(q)]
+        starts = [s for s in students if s["name"].lower().startswith(q) or str(s["id"]).lower().startswith(q)]
         contains = [s for s in students if q in s["name"].lower() and s not in starts]
         results = (starts + contains)[:8]
     return jsonify(results)
+
+
+@app.route("/api/students/lookup")
+def api_student_lookup():
+    """Exact match by student ID or full name -- used to fill in the rest of
+    a form when someone types a name/ID without picking from the list."""
+    return jsonify(resolve_student(request.args.get("q", "")))
+
+
+MAX_ENTRIES_SHOWN = 500
+
+
+def _entry_form_values(cfg):
+    """Reads an entry form. Returns (values, logged_by, error_message)."""
+    entry_date, error = parse_entry_date(request.form.get("date"))
+    if error:
+        return None, None, error
+    name = request.form.get("name", "").strip()
+    student_id = request.form.get("student_id", "").strip()
+    if not name and not student_id:
+        return None, None, "Please pick a student (type their name or student ID)."
+    if not name and not find_student_by_id(student_id):
+        return None, None, f"There's no student with ID {student_id} in the master list."
+    values = {
+        "Date": entry_date,
+        "Name": name,
+        "StudentID": student_id,
+        "Class": request.form.get("klass", "").strip(),
+        "Section": request.form.get("section", "").strip(),
+        "House": request.form.get("house", "").strip(),
+        "Remarks": request.form.get("remarks", "").strip(),
+    }
+    for field, _ in cfg["extra_fields"]:
+        values[field] = request.form.get(field, "").strip()
+    return values, request.form.get("logged_by", "").strip(), None
+
+
+def _form_from_entry(row, cfg):
+    """Pre-fills the edit form from a saved entry."""
+    d = _row_date(row)
+    student = find_student_by_name(row.get("Name", ""))
+    form = {
+        "date": d.isoformat() if d else "",
+        "name": row.get("Name", ""),
+        "student_id": student["id"] if student else "",
+        "klass": row.get("Class", ""),
+        "section": row.get("Section", ""),
+        "house": row.get("House", ""),
+        "logged_by": row.get("LoggedBy", ""),
+        "remarks": row.get("Remarks", ""),
+    }
+    for field, _ in cfg["extra_fields"]:
+        form[field] = row.get(field, "")
+    return form
+
+
+def _render_entry_page(key, form, status=200):
+    cfg = CATEGORIES[key]
+    rows = read_log_rows(key, limit=MAX_ENTRIES_SHOWN)
+    return render_template(
+        "entry.html", key=key, cfg=cfg, categories=CATEGORIES, rows=rows,
+        form=form, today=date.today(), max_shown=MAX_ENTRIES_SHOWN,
+    ), status
 
 
 @app.route("/entry/<key>", methods=["GET", "POST"])
@@ -788,21 +1259,89 @@ def entry(key):
     cfg = CATEGORIES[key]
 
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        if not name:
-            flash("Please pick a student name.", "error")
-            return redirect(url_for("entry", key=key))
-
-        values = {"Name": name, "Remarks": request.form.get("remarks", "").strip()}
-        for field, _ in cfg["extra_fields"]:
-            values[field] = request.form.get(field, "").strip()
-
-        entry_id = append_log_entry(key, values, request.form.get("logged_by", "").strip(), "Manual")
-        flash(f"Saved ({entry_id}) for {name}.", "success")
+        values, logged_by, error = _entry_form_values(cfg)
+        if error:
+            flash(error, "error")
+            return _render_entry_page(key, request.form, status=400)
+        entry_id = append_log_entry(key, values, logged_by, "Manual")
+        saved = get_log_entry(key, entry_id)
+        flash(f"Saved {entry_id} for {saved['Name'] if saved else values['Name']} ({values['Date'].strftime('%d %b %Y')}).", "success")
         return redirect(url_for("entry", key=key))
 
-    recent_rows = read_log_rows(key, limit=15)
-    return render_template("entry.html", key=key, cfg=cfg, categories=CATEGORIES, recent_rows=recent_rows)
+    return _render_entry_page(key, {"date": date.today().isoformat()})
+
+
+@app.route("/entry/<key>/<entry_id>/edit", methods=["GET", "POST"])
+def edit_entry(key, entry_id):
+    if key not in CATEGORIES:
+        return "Unknown category", 404
+    cfg = CATEGORIES[key]
+    row = get_log_entry(key, entry_id)
+    if row is None:
+        flash(f"Entry {entry_id} doesn't exist (it may have been deleted).", "error")
+        return redirect(url_for("entry", key=key))
+
+    if request.method == "POST":
+        values, logged_by, error = _entry_form_values(cfg)
+        if error:
+            flash(error, "error")
+            return render_template(
+                "entry_edit.html", key=key, cfg=cfg, categories=CATEGORIES,
+                entry_id=entry_id, row=row, form=request.form, today=date.today(),
+            ), 400
+        if update_log_entry(key, entry_id, values, logged_by):
+            flash(f"Updated {entry_id}.", "success")
+        else:
+            flash(f"Entry {entry_id} doesn't exist anymore.", "error")
+        return redirect(url_for("entry", key=key))
+
+    return render_template(
+        "entry_edit.html", key=key, cfg=cfg, categories=CATEGORIES,
+        entry_id=entry_id, row=row, form=_form_from_entry(row, cfg), today=date.today(),
+    )
+
+
+@app.route("/entry/<key>/<entry_id>/delete", methods=["POST"])
+def delete_entry(key, entry_id):
+    if key not in CATEGORIES:
+        return "Unknown category", 404
+    if delete_log_entry(key, entry_id):
+        flash(f"Deleted {entry_id}.", "success")
+    else:
+        flash(f"Entry {entry_id} was already gone.", "error")
+    return redirect(url_for("entry", key=key))
+
+
+def _request_is_from_server_pc():
+    """True when the browser is running on the PC that hosts the app, either
+    via localhost or via the server's own LAN address."""
+    remote = request.remote_addr or ""
+    host = (request.host or "").rsplit(":", 1)[0].strip("[]")
+    return remote in ("127.0.0.1", "::1") or remote == host
+
+
+def _open_file_on_server(path):
+    os.startfile(path)
+
+
+@app.route("/open-excel")
+def open_excel():
+    """On the server PC, opens the live workbook in Excel. From any other PC
+    (or with ?download=1) it downloads a copy instead -- changes made to that
+    copy are NOT saved back to the app."""
+    if request.args.get("download") != "1" and _request_is_from_server_pc() and hasattr(os, "startfile"):
+        try:
+            _open_file_on_server(DB_PATH)
+        except OSError as exc:
+            flash(f"Couldn't open Excel: {exc}", "error")
+        else:
+            flash(
+                "Opened the Excel file on this PC. Close Excel before logging or editing "
+                "entries here; the app can't save while the file is open.",
+                "success",
+            )
+        return redirect(request.referrer or url_for("dashboard"))
+    return send_file(DB_PATH, as_attachment=True, download_name="SchoolDisciplineSystem.xlsx")
 
 
 @app.route("/scan", methods=["GET", "POST"])
@@ -840,6 +1379,7 @@ def scan():
             warning=warning,
             ocr_available=ocr_ready(),
             ocr_backend=ocr_backend_label(),
+            today=date.today(),
         )
 
     hint_key = request.args.get("hint")
@@ -857,7 +1397,13 @@ def scan_commit():
         flash("Please choose which register this scan belongs to before saving.", "error")
         return redirect(url_for("scan"))
 
+    entry_date, date_error = parse_entry_date(request.form.get("date"))
+    if date_error:
+        flash(f"{date_error} Nothing was saved -- please scan the page again.", "error")
+        return redirect(url_for("scan", hint=key))
+
     names = request.form.getlist("row_name")
+    student_ids = request.form.getlist("row_student_id")
     houses = request.form.getlist("row_house")
     classes = request.form.getlist("row_class")
     includes = request.form.getlist("row_include")  # values are the row indices that were checked
@@ -870,10 +1416,13 @@ def scan_commit():
         if i not in included:
             continue
         name = name.strip()
-        if not name:
+        student_id = student_ids[i].strip() if i < len(student_ids) else ""
+        if not name and not student_id:
             continue
         values = {
+            "Date": entry_date,
             "Name": name,
+            "StudentID": student_id,
             "House": houses[i].strip() if i < len(houses) else "",
             "Class": classes[i].strip() if i < len(classes) else "",
             "Remarks": remarks_list[i] if i < len(remarks_list) else "",
@@ -881,7 +1430,11 @@ def scan_commit():
         append_log_entry(key, values, logged_by, "OCR")
         saved += 1
 
-    flash(f"Saved {saved} entr{'y' if saved == 1 else 'ies'} from the scan into {CATEGORIES[key]['label']}.", "success")
+    flash(
+        f"Saved {saved} entr{'y' if saved == 1 else 'ies'} from the scan into "
+        f"{CATEGORIES[key]['label']}, dated {entry_date.strftime('%d %b %Y')}.",
+        "success",
+    )
     return redirect(url_for("entry", key=key))
 
 
@@ -929,4 +1482,7 @@ if __name__ == "__main__":
     else:
         print(f"Using database: {DB_PATH}")
         print(f"OCR backend: {ocr_backend_label()} (ready: {ocr_ready()})")
+        if USING_GEMINI:
+            fallback = "Tesseract" if OCR_AVAILABLE else "nothing (Tesseract not installed)"
+            print(f"OCR model order: {' -> '.join(GEMINI_MODELS)} -> {fallback}")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

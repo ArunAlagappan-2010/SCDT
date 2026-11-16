@@ -11,28 +11,9 @@
 
 <div class="panel">
   <h2>New entry</h2>
-  <form method="post" class="form-grid">
-    <div class="field autocomplete-wrap">
-      <label>Student name</label>
-      <input type="text" id="name-input" name="name" autocomplete="off" placeholder="Start typing to search the master list..." required>
-      <div class="autocomplete-list" id="name-list"></div>
-      <span class="small-note" id="name-meta"></span>
-    </div>
-    <div class="field">
-      <label>Logged by (staff name)</label>
-      <input type="text" name="logged_by" placeholder="e.g. Mrs. Rao">
-    </div>
-    {% for field, itype in cfg.extra_fields %}
-    <div class="field">
-      <label>{{ field }}</label>
-      <input type="text" name="{{ field }}" placeholder="{{ field }}">
-    </div>
-    {% endfor %}
-    <div class="field span2">
-      <label>Remarks</label>
-      <textarea name="remarks" placeholder="Any additional notes"></textarea>
-    </div>
-    <div class="field span2">
+  <form method="post" class="form-grid three">
+    {% include "_entry_fields.html" %}
+    <div class="field span-all">
       <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save entry</button>
     </div>
   </form>
@@ -40,24 +21,45 @@
 </div>
 
 <div class="panel">
-  <h2>Recently logged</h2>
-  {% if recent_rows %}
-  <table>
-    <thead><tr><th>Date</th><th>Name</th><th>Class</th>{% for f,_ in cfg.extra_fields %}<th>{{ f }}</th>{% endfor %}<th>Remarks</th><th>By</th><th>Source</th></tr></thead>
-    <tbody>
-      {% for row in recent_rows %}
-      <tr>
-        <td>{{ row.Date.strftime('%d %b %Y') if row.Date and row.Date.strftime else row.Date }}</td>
-        <td>{{ row.Name }}</td>
-        <td>{{ row.Class }}</td>
-        {% for f,_ in cfg.extra_fields %}<td>{{ row[f] }}</td>{% endfor %}
-        <td>{{ row.Remarks }}</td>
-        <td>{{ row.LoggedBy }}</td>
-        <td>{{ row.Source }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <h2>
+    <span>All {{ cfg.label }} entries ({{ rows|length }}{{ '+' if rows|length >= max_shown else '' }})</span>
+    <input type="search" id="entry-filter" class="filter-input" placeholder="Filter by name, ID, date...">
+  </h2>
+  {% if rows %}
+  <div class="table-scroll">
+    <table id="entries-table">
+      <thead>
+        <tr>
+          <th></th><th>Date</th><th>Name</th><th>Class</th><th>House</th>
+          {% for f,_ in cfg.extra_fields %}<th>{{ f }}</th>{% endfor %}
+          <th>Remarks</th><th>By</th><th>Source</th><th>Entry</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="row-actions">
+            <a class="btn btn-sm btn-outline" href="{{ url_for('edit_entry', key=key, entry_id=row.EntryID) }}">Edit</a>
+            <form method="post" action="{{ url_for('delete_entry', key=key, entry_id=row.EntryID) }}"
+                  data-confirm="Delete {{ row.EntryID }} for {{ row.Name }}? This cannot be undone.">
+              <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+            </form>
+          </td>
+          <td class="nowrap">{{ row.Date.strftime('%d %b %Y') if row.Date and row.Date.strftime else row.Date }}</td>
+          <td class="nowrap">{{ row.Name }}</td>
+          <td class="nowrap">{{ row.Class }}{{ '-' ~ row.Section if row.Section else '' }}</td>
+          <td>{{ row.House }}</td>
+          {% for f,_ in cfg.extra_fields %}<td>{{ row[f] }}</td>{% endfor %}
+          <td>{{ row.Remarks }}</td>
+          <td>{{ row.LoggedBy }}</td>
+          <td>{{ row.Source }}</td>
+          <td class="muted-cell">{{ row.EntryID }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small-note" id="filter-empty" hidden>No entries match that filter.</p>
   {% else %}
   <p class="small-note">Nothing logged yet.</p>
   {% endif %}
@@ -65,10 +67,7 @@
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script>
-  attachAutocomplete(document.getElementById('name-input'), document.getElementById('name-list'), {
-    onSelect: function (s) {
-      document.getElementById('name-meta').textContent = 'Class ' + (s.class || '?') + (s.section ? '-' + s.section : '') + ' | Roll ' + (s.roll || '?') + ' | House ' + (s.house || '?');
-    }
-  });
+  attachStudentForm();
+  attachTableFilter(document.getElementById('entry-filter'), document.getElementById('entries-table'), document.getElementById('filter-empty'));
 </script>
 {% endblock %}

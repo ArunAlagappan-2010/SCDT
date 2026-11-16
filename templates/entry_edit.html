@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ entry_id }}{% endblock %}
+{% block content %}
+<h1>Edit {{ entry_id }}</h1>
+<p class="subtitle">{{ cfg.label }} &middot; logged {{ 'by scan' if row.Source == 'OCR' else 'manually' }}{{ ' by ' ~ row.LoggedBy if row.LoggedBy else '' }}. Change anything below and save.</p>
+
+<div class="panel">
+  <form method="post" class="form-grid three">
+    {% include "_entry_fields.html" %}
+    <div class="field span-all form-actions">
+      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save changes</button>
+      <a class="btn btn-outline" href="{{ url_for('entry', key=key) }}">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Delete this entry</h2>
+  <form method="post" action="{{ url_for('delete_entry', key=key, entry_id=entry_id) }}"
+        data-confirm="Delete {{ entry_id }} for {{ row.Name }}? This cannot be undone.">
+    <p class="small-note" style="margin-bottom:12px;">Removes it from the Excel file and from every dashboard count. This can't be undone.</p>
+    <button type="submit" class="btn btn-danger">Delete {{ entry_id }}</button>
+  </form>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>attachStudentForm();</script>
+{% endblock %}

@@ -3,6 +3,10 @@
 {% block content %}
 <h1>Master Student List</h1>
 <p class="subtitle">This is the "source of truth" name list used for autocomplete everywhere else. Keep it up to date and every entry form + the Excel dropdowns stay in sync.</p>
+<p style="margin:-12px 0 22px;">
+  <a class="btn btn-outline" href="{{ url_for('open_excel') }}">Open Excel file</a>
+  <span class="small-note" style="margin-left:8px;">Opens in Excel on the server PC; downloads a copy anywhere else. Close Excel before saving changes here.</span>
+</p>
 
 <div class="panel">
   <h2>Add a student</h2>

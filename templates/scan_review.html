@@ -36,10 +36,15 @@
 
     <div class="form-grid" style="margin: 16px 0 10px;">
       <div class="field">
+        <label for="scan-date">Date on the register</label>
+        <input type="date" id="scan-date" name="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+      </div>
+      <div class="field">
         <label>Logged by (staff name)</label>
         <input type="text" name="logged_by" placeholder="e.g. Mrs. Rao">
       </div>
     </div>
+    <p class="small-note" style="margin-bottom:12px;">Names found in the master list get their house and class filled in from it. Type a name or student ID to fix a row.</p>
     <table class="review-table">
       <thead>
         <tr>
@@ -61,7 +66,9 @@
           <td><input type="text" class="row-house-input" name="row_house" value="{{ c.guess_house }}" placeholder="House"></td>
           <td class="autocomplete-wrap">
             <input type="text" class="row-name-input" name="row_name" value="{{ c.guess_name }}" autocomplete="off">
+            <input type="hidden" class="row-id-input" name="row_student_id" value="{{ c.student_id }}">
             <div class="autocomplete-list row-name-list"></div>
+            <span class="small-note row-id-note">{{ c.student_id }}</span>
           </td>
           <td><input type="text" class="row-class-input" name="row_class" value="{{ c.guess_class }}" placeholder="Class"></td>
           <td><input type="text" name="row_remarks" placeholder="Remarks"></td>
@@ -88,6 +95,8 @@
     const input = row.querySelector('.row-name-input');
     const list = row.querySelector('.row-name-list');
     if (!input || !list) return;
+    const idInput = row.querySelector('.row-id-input');
+    const idNote = row.querySelector('.row-id-note');
     attachAutocomplete(input, list, {
       onSelect: function (s) {
         // A confirmed student match is the source of truth -- overwrite
@@ -96,6 +105,14 @@
         const classInput = row.querySelector('.row-class-input');
         if (houseInput) houseInput.value = s.house || houseInput.value;
         if (classInput) classInput.value = (s.class || classInput.value) + (s.section ? '-' + s.section : '');
+        idInput.value = s.id;
+        idNote.textContent = s.id;
+        const include = row.querySelector('input[name="row_include"]');
+        if (include) include.checked = true;
+      },
+      onNoMatch: function () {
+        idInput.value = '';
+        idNote.textContent = 'Not in master list';
       }
     });
   });

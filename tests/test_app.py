@@ -188,9 +188,9 @@ def run():
         "/scan/commit",
         data={
             "category": "Uniform",
-            "row_name": ["Aarav Sharma", "Diya Patel"],
+            "row_name": ["Rohan Gupta", "Diya Patel"],
             "row_house": ["Wrong Guess", ""],  # OCR's raw guess -- matched student's real House should win
-            "row_class": ["9", ""],
+            "row_class": ["10", ""],
             "row_include": ["0"],  # only the first row is checked
             "row_remarks": ["", ""],
             "logged_by": "Scan-Test",
@@ -201,7 +201,7 @@ def run():
     uniform_rows = appmod.read_log_rows("Uniform", limit=10000)
     check("scan commit saved exactly the checked row", len(uniform_rows) == before_scan_commit + 1, f"before={before_scan_commit} rows={uniform_rows}")
     ocr_rows = [row for row in uniform_rows if row.get("Source") == "OCR" and row.get("LoggedBy") == "Scan-Test"]
-    check("scan commit row has Source=OCR", len(ocr_rows) == 1 and ocr_rows[0]["Name"] == "Aarav Sharma", str(ocr_rows))
+    check("scan commit row has Source=OCR", len(ocr_rows) == 1 and ocr_rows[0]["Name"] == "Rohan Gupta", str(ocr_rows))
     check(
         "scan commit uses the matched student's real House, not OCR's raw guess",
         ocr_rows and ocr_rows[0]["House"] == "Kailash",
@@ -298,6 +298,84 @@ def run():
         appmod.USING_GEMINI = orig_using_gemini
         appmod.OCR_AVAILABLE = orig_ocr_available
 
+    # 13b-2. Gemini model fallback chain (model A out of quota -> model B ->
+    # ...) -- _gemini_request is monkeypatched, so no network call is made.
+    from PIL import Image as _Image
+    chain_img = os.path.join(TMP_DIR, "chain_test.png")
+    _Image.new("RGB", (60, 40), "white").save(chain_img)
+    orig_request, orig_models = appmod._gemini_request, appmod.GEMINI_MODELS
+    try:
+        appmod.GEMINI_MODELS = ["model-a", "model-b", "model-c"]
+        calls = []
+
+        def fake_request(responses):
+            def _fake(model, b64_image, timeout):
+                calls.append(model)
+                return responses[model]
+            return _fake
+
+        def reset():
+            calls.clear()
+            appmod._gemini_cooldown_until.clear()
+
+        reset()
+        appmod._gemini_request = fake_request({
+            "model-a": ("", "HTTP 429: quota used up", "quota"),
+            "model-b": ("text from b", None, None),
+            "model-c": ("text from c", None, None),
+        })
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("model chain moves to the next model on a quota error", text == "text from b" and error is None, f"{text!r} {error!r}")
+        check("model chain stops at the first model that works", calls == ["model-a", "model-b"], str(calls))
+
+        calls.clear()
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("a model that just failed is skipped on the next scan", calls == ["model-b"], str(calls))
+
+        reset()
+        appmod._gemini_request = fake_request({
+            "model-a": ("", "HTTP 404: retired", "gone"),
+            "model-b": ("", "HTTP 503: overloaded", "busy"),
+            "model-c": ("", "no answer within 45s", "busy"),
+        })
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("model chain tries every model before giving up", calls == ["model-a", "model-b", "model-c"], str(calls))
+        check("model chain reports an error naming each failed model", error is not None and all(m in error for m in appmod.GEMINI_MODELS), str(error))
+
+        calls.clear()
+        appmod._gemini_request = fake_request({
+            "model-a": ("back again", None, None),
+            "model-b": ("text from b", None, None),
+            "model-c": ("text from c", None, None),
+        })
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("when every model is cooling down they are all retried anyway", text == "back again" and calls == ["model-a"], f"{text!r} {calls}")
+
+        reset()
+        appmod._gemini_request = fake_request({
+            "model-a": ("", "HTTP 403: API key not valid", "auth"),
+            "model-b": ("text from b", None, None),
+            "model-c": ("text from c", None, None),
+        })
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("a rejected API key stops the chain (other models can't help)", calls == ["model-a"] and error is not None and "API key" in error, f"{calls} {error!r}")
+
+        reset()
+        appmod._gemini_request = fake_request({
+            "model-a": ("", "could not reach Gemini", "network"),
+            "model-b": ("text from b", None, None),
+            "model-c": ("text from c", None, None),
+        })
+        text, error = appmod.run_ocr_gemini(chain_img)
+        check("no internet stops the chain (other models can't help)", calls == ["model-a"] and error is not None, f"{calls} {error!r}")
+        check("a network failure doesn't put the model on cooldown", "model-a" not in appmod._gemini_cooldown_until)
+    finally:
+        appmod._gemini_request = orig_request
+        appmod.GEMINI_MODELS = orig_models
+        appmod._gemini_cooldown_until.clear()
+
+    check("gemini-4-argon is not in the default free-tier chain", "gemini-4-argon" not in appmod.GEMINI_FALLBACK_MODELS)
+
     # 13c. Structured House/Name/Class extraction (the Gemini path) -- this is
     # the actual feature requested: pull 3 fields per row, and never treat the
     # register's own column-heading row as if it were a student.
@@ -320,10 +398,26 @@ def run():
     check("build_candidates_from_structured keeps the 2 real rows", len(candidates) == 2, str(candidates))
     rohan_candidate = next((c for c in candidates if "Rohan" in c["guess_name"]), None)
     check("build_candidates_from_structured matches a known student by name", rohan_candidate is not None and rohan_candidate["confident"])
-    check("build_candidates_from_structured carries House through", rohan_candidate is not None and rohan_candidate["guess_house"] == "Red")
-    check("build_candidates_from_structured carries Class through", rohan_candidate is not None and rohan_candidate["guess_class"] == "10")
+    rohan_master = appmod.find_student_by_name("Rohan Gupta", students_for_ocr)
+    check(
+        "a matched student's House comes from the master list, not OCR",
+        rohan_candidate is not None and rohan_candidate["guess_house"] == rohan_master["house"],
+        str(rohan_candidate),
+    )
+    check(
+        "a matched student's Class comes from the master list, not OCR",
+        rohan_candidate is not None and rohan_candidate["guess_class"] == appmod.class_label(rohan_master),
+        str(rohan_candidate),
+    )
+    check("a matched student carries their student ID", rohan_candidate is not None and rohan_candidate["student_id"] == rohan_master["id"])
     unknown_candidate = next((c for c in candidates if "Unknown" in c["guess_name"]), None)
     check("unmatched name still comes through unconfident (for manual review)", unknown_candidate is not None and not unknown_candidate["confident"])
+    check(
+        "an unmatched student keeps what OCR read for House/Class, with no ID",
+        unknown_candidate is not None and unknown_candidate["guess_house"] == "Blue"
+        and unknown_candidate["guess_class"] == "7" and unknown_candidate["student_id"] == "",
+        str(unknown_candidate),
+    )
 
     # Gemini wrapping its JSON in a markdown code fence (common LLM habit) should still parse.
     fenced = "```json\n" + gemini_json_text + "\n```"
@@ -337,13 +431,19 @@ def run():
     check("is_header_like does not flag a real student row", not appmod.is_header_like(["Red", "Rohan Gupta", "10"]))
 
     tesseract_lines = appmod.parse_ocr_lines(
-        "House    Name    Class\nRed    Rohan Gupta    10\nBlue    Diya Patel    9",
+        "House    Name    Class\nRed    Xyzzy Qwerty    10\nBlue    Diya Patel    9",
         students_for_ocr,
     )
     check("parse_ocr_lines (Tesseract path) also drops the header line", len(tesseract_lines) == 2, str(tesseract_lines))
     check(
         "parse_ocr_lines splits House/Name/Class from spaced columns",
         tesseract_lines[0]["guess_house"] == "Red" and tesseract_lines[0]["guess_class"] == "10",
+        str(tesseract_lines),
+    )
+    diya_master = appmod.find_student_by_name("Diya Patel", students_for_ocr)
+    check(
+        "parse_ocr_lines fills a matched student's House/Class from the master list",
+        tesseract_lines[1]["guess_house"] == diya_master["house"] and tesseract_lines[1]["guess_class"] == appmod.class_label(diya_master),
         str(tesseract_lines),
     )
 
@@ -436,6 +536,148 @@ def run():
     chart = appmod.weekly_flag_chart_series(flags, num_weeks=10)
     check("weekly_flag_chart_series returns num_weeks entries", len(chart) == 10)
     check("weekly_flag_chart_series entries have label/count", all("label" in c and "count" in c for c in chart))
+
+    # 17. Entry date input
+    today = date.today()
+    d, err = appmod.parse_entry_date("")
+    check("blank entry date means today", d == today and err is None)
+    d, err = appmod.parse_entry_date((today - timedelta(days=40)).isoformat())
+    check("a past entry date is accepted", d == today - timedelta(days=40) and err is None)
+    d, err = appmod.parse_entry_date("not-a-date")
+    check("a malformed entry date is rejected", d is None and err)
+    d, err = appmod.parse_entry_date((today + timedelta(days=1)).isoformat())
+    check("a future entry date is rejected", d is None and err and "future" in err)
+
+    # 18. Finding a student by ID or name
+    master = appmod.get_master_students()
+    kabir = appmod.find_student_by_name("Kabir Singh", master)
+    meera = appmod.find_student_by_name("Meera Nair", master)
+    check("resolve_student finds a student by ID (any case)", appmod.resolve_student("", kabir["id"].lower(), master) == kabir)
+    check("resolve_student finds a student by an ID typed in the name box", appmod.resolve_student(meera["id"], "", master) == meera)
+    check("resolve_student finds a student by exact name", appmod.resolve_student("kabir singh", "", master) == kabir)
+    check("resolve_student returns None for an unknown student", appmod.resolve_student("Nobody Atall", "STU999", master) is None)
+    check("lookup API returns the student for an ID", client.get(f"/api/students/lookup?q={kabir['id']}").get_json()["name"] == "Kabir Singh")
+    check("lookup API returns null for an unknown student", client.get("/api/students/lookup?q=zzz").get_json() is None)
+    check("search API also matches on student ID", any(s["id"] == kabir["id"] for s in client.get(f"/api/students?q={kabir['id']}").get_json()))
+
+    # 19. Manual entry: backdated, by ID only, and ID typed in the name box
+    backdate = today - timedelta(days=40)
+    before_ids = {row["EntryID"] for row in appmod.read_log_rows("Defaulters", limit=100000)}
+    r = client.post("/entry/Defaulters", data={
+        "date": backdate.isoformat(), "name": "", "student_id": kabir["id"],
+        "Reason": "No homework", "remarks": "", "logged_by": "Test",
+    }, follow_redirects=True)
+    new_rows = [row for row in appmod.read_log_rows("Defaulters", limit=100000) if row["EntryID"] not in before_ids]
+    check("entry by student ID only is saved", r.status_code == 200 and len(new_rows) == 1, str(new_rows))
+    by_id = new_rows[0] if new_rows else {}
+    check("entry by ID fills name/class/house from the master list",
+          by_id.get("Name") == "Kabir Singh" and str(by_id.get("Class")) == str(kabir["class"]) and by_id.get("House") == kabir["house"], str(by_id))
+    check("entry keeps the date that was typed in", appmod._row_date(by_id) == backdate, str(by_id.get("Date")))
+
+    before_ids = {row["EntryID"] for row in appmod.read_log_rows("Defaulters", limit=100000)}
+    client.post("/entry/Defaulters", data={"name": meera["id"], "Reason": "Late work"}, follow_redirects=True)
+    new_rows = [row for row in appmod.read_log_rows("Defaulters", limit=100000) if row["EntryID"] not in before_ids]
+    check("an ID typed in the name box saves under the student's real name",
+          len(new_rows) == 1 and new_rows[0]["Name"] == "Meera Nair" and new_rows[0]["House"] == meera["house"], str(new_rows))
+
+    count_before = len(appmod.read_log_rows("Defaulters", limit=100000))
+    r = client.post("/entry/Defaulters", data={"date": (today + timedelta(days=3)).isoformat(), "name": "Kabir Singh"})
+    check("a future-dated entry is refused", r.status_code == 400 and len(appmod.read_log_rows("Defaulters", limit=100000)) == count_before)
+    r = client.post("/entry/Defaulters", data={"name": "", "student_id": "STU999"})
+    check("an unknown student ID alone is refused", r.status_code == 400 and len(appmod.read_log_rows("Defaulters", limit=100000)) == count_before)
+
+    # 20. Edit an entry
+    entry_id = by_id.get("EntryID")
+    r = client.get(f"/entry/Defaulters/{entry_id}/edit")
+    check("edit page loads", r.status_code == 200 and entry_id.encode() in r.data)
+    new_date = today - timedelta(days=2)
+    r = client.post(f"/entry/Defaulters/{entry_id}/edit", data={
+        "date": new_date.isoformat(), "name": "Kabir Singh", "student_id": kabir["id"],
+        "Reason": "Incomplete project", "remarks": "Parent informed", "logged_by": "Editor",
+    }, follow_redirects=True)
+    edited = appmod.get_log_entry("Defaulters", entry_id)
+    check("editing changes the saved values",
+          r.status_code == 200 and edited["Reason"] == "Incomplete project" and edited["Remarks"] == "Parent informed"
+          and appmod._row_date(edited) == new_date and edited["LoggedBy"] == "Editor", str(edited))
+    check("editing keeps the entry ID and source", edited["EntryID"] == entry_id and edited["Source"] == "Manual")
+    r = client.get("/entry/Defaulters/DE-99999/edit", follow_redirects=True)
+    check("editing a missing entry says so", r.status_code == 200 and b"doesn&#39;t exist" in r.data)
+
+    # 21. Delete an entry
+    count_before = len(appmod.read_log_rows("Defaulters", limit=100000))
+    r = client.post(f"/entry/Defaulters/{entry_id}/delete", follow_redirects=True)
+    check("deleting removes the entry", r.status_code == 200 and appmod.get_log_entry("Defaulters", entry_id) is None
+          and len(appmod.read_log_rows("Defaulters", limit=100000)) == count_before - 1)
+    from openpyxl import load_workbook as _load
+    ws = _load(TEST_DB)["Defaulters"]
+    blank_rows = [r_ for r_ in range(2, ws.max_row + 1) if not ws.cell(row=r_, column=1).value]
+    first_blank = blank_rows[0] if blank_rows else None
+    check("a deleted row gets its auto-fill formulas back",
+          first_blank is not None and str(ws.cell(row=first_blank, column=4).value).startswith("=IFERROR(VLOOKUP(C"))
+    r = client.post(f"/entry/Defaulters/{entry_id}/delete", follow_redirects=True)
+    check("deleting it twice is handled", r.status_code == 200 and b"already gone" in r.data)
+
+    # 22. Open Excel button
+    opened = []
+    orig_open = appmod._open_file_on_server
+    try:
+        appmod._open_file_on_server = lambda path: opened.append(path)
+        r = client.get("/open-excel")
+        check("on the server PC, Open Excel opens the live file", r.status_code == 302 and opened == [appmod.DB_PATH], str(opened))
+        r = client.get("/open-excel", environ_base={"REMOTE_ADDR": "192.168.1.77"})
+        check("from another PC, Open Excel downloads a copy",
+              r.status_code == 200 and "attachment" in r.headers.get("Content-Disposition", "") and len(opened) == 1)
+        r = client.get("/open-excel?download=1")
+        check("?download=1 always downloads", r.status_code == 200 and "attachment" in r.headers.get("Content-Disposition", ""))
+    finally:
+        appmod._open_file_on_server = orig_open
+
+    # 23. Saving while Excel has the file open shows a message instead of crashing
+    orig_save = appmod.save_wb
+    try:
+        def locked(_wb):
+            raise appmod.WorkbookLocked()
+        appmod.save_wb = locked
+        r = client.post("/entry/Defaulters", data={"name": "Kabir Singh"}, headers={"Referer": "/entry/Defaulters"}, follow_redirects=True)
+        check("a locked Excel file gives a clear message", r.status_code == 200 and b"Excel file is open" in r.data)
+    finally:
+        appmod.save_wb = orig_save
+
+    # 24. Dashboard patterns (synthetic data with a fixed "today")
+    pt_today = date(2026, 3, 18)  # a Wednesday
+    def row(name, d, klass="9", section="A", house="Kailash", **extra):
+        base = {"Name": name, "Date": d, "Class": klass, "Section": section, "House": house}
+        base.update(extra)
+        return base
+    synthetic = {
+        "LateComers": [
+            row("A Kid", date(2026, 3, 16), Time="8:40 AM", Reason="Bus late"),
+            row("A Kid", date(2026, 3, 17), Time="8:35", Reason="bus late"),
+            row("A Kid", date(2026, 3, 18), Time="8:44 am", Reason="Overslept"),
+            row("B Kid", date(2026, 3, 9), klass="10", section="B", house="Aravali", Time="8:31", Reason="Bus late"),
+            row("C Kid", date(2026, 3, 2), klass="10", section="B", house="Aravali", Time="9:10", Reason=""),
+            row("D Kid", date(2026, 2, 9), Time="8:40", Reason=""),
+        ],
+        "Defaulters": [],
+        "Uniform": [row("A Kid", date(2026, 3, 10), Issue="No tie")],
+        "NailsHair": [],
+    }
+    pt_flags = appmod.compute_weekly_repeat_flags(synthetic, threshold=3)
+    patterns = appmod.build_patterns(synthetic, pt_flags, pt_today)
+    texts = [p["text"] for p in patterns]
+    joined = " | ".join(texts)
+    check("patterns lead with students already at 3+ this week",
+          patterns and patterns[0]["tone"] == "alert" and "A Kid" in patterns[0]["text"] and "this week" in patterns[0]["text"], joined)
+    check("patterns compare this month with last month",
+          any(p["tone"] == "up" and "Late Comers" in p["text"] and "400%" in p["text"] for p in patterns), joined)
+    check("patterns spot the peak weekday", "Mondays" in joined, joined)
+    check("patterns spot the usual late-arrival time", "8:30 and 8:45" in joined, joined)
+    check("patterns spot the most common reason", "“Bus late” (3 times)" in joined, joined)
+    check("patterns spot students in more than one register", "more than one register" in joined and "A Kid (Late Comers, Uniform)" in joined, joined)
+    check("patterns are capped", len(patterns) <= appmod.MAX_PATTERNS)
+    check("no data means no patterns", appmod.build_patterns({k: [] for k in appmod.CATEGORIES}, [], pt_today) == [])
+    r = client.get("/")
+    check("dashboard shows the Patterns panel", r.status_code == 200 and b"Patterns" in r.data)
 
 
 try:

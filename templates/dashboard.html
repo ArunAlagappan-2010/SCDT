@@ -40,6 +40,23 @@
 </div>
 
 <div class="panel">
+  <h2>Patterns</h2>
+  {% if stats.patterns %}
+  <ul class="pattern-list">
+    {% for p in stats.patterns %}
+    <li class="pattern-item pattern-{{ p.tone }}">
+      <span class="pattern-mark" aria-hidden="true">{% if p.tone == 'alert' %}!{% elif p.tone == 'up' %}&#9650;{% elif p.tone == 'down' %}&#9660;{% else %}&bull;{% endif %}</span>
+      <span>{{ p.text }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="small-note" style="margin-top:10px;">&#9650; more incidents than last month &middot; &#9660; fewer &middot; ! needs attention</p>
+  {% else %}
+  <p class="small-note">Not enough entries yet &mdash; patterns show up here once a few weeks of entries are logged.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
   <h2>Repeated 3+ times in the same week</h2>
   {% if stats.weekly_flags %}
   <table>

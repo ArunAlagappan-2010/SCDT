@@ -30,6 +30,7 @@
       {% endfor %}
       <div class="nav-group-label">Data</div>
       <a href="{{ url_for('students') }}" class="nav-link {{ 'active' if request.endpoint=='students' else '' }}">Master student list</a>
+      <a href="{{ url_for('open_excel') }}" class="nav-link" title="Opens the Excel file on the server PC. On any other PC it downloads a copy instead.">Open Excel file</a>
     </nav>
   </aside>
   <main class="content">
