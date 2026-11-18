@@ -33,3 +33,9 @@ installer/install.json
 installer/mctm.ico
 data/server.pid
 data/server.log
+data/settings.json
+data/setup-done.json
+# Register photos waiting to be scanned (real student names)
+data/scan-folder/
+# Scan batches waiting for review (real student names)
+data/scan-jobs/

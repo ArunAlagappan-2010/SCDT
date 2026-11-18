@@ -3,20 +3,27 @@
 {% block content %}
 <header class="page-head" data-enter>
   <div>
-    <h1>Scan a register page</h1>
-    <p class="subtitle">Upload a photo of any register page. The page title tells us which register it belongs to, and you check every name before anything is saved.</p>
+    <h1>Scan register pages</h1>
   </div>
-  {% if ocr_available %}
-  <span class="engine-chip">Reading with <b>{{ ocr_backend }}</b></span>
-  {% else %}
-  <span class="engine-chip is-off">No reading engine set up</span>
-  {% endif %}
+  <div class="head-actions">
+    {% if ocr_available %}
+    <span class="engine-chip">Reading with <b>{{ ocr_backend }}</b></span>
+    {% else %}
+    <span class="engine-chip is-off">No reading engine set up</span>
+    {% endif %}
+    {% if not using_gemini and on_server_pc %}
+    {# Gemini is the main reader once a key is added; Tesseract becomes the backup. #}
+    <form method="post" action="{{ url_for('scan_gemini_key') }}">
+      <input type="hidden" name="hint" value="{{ hint_key }}">
+      <button class="btn btn-outline btn-sm" type="submit">Add Gemini key</button>
+    </form>
+    {% endif %}
+  </div>
 </header>
 
 {% if not ocr_available %}
 <div class="warn-box">
-  OCR isn't set up on this server yet: the Tesseract engine is missing and no Gemini API key is configured.
-  You can still upload, but no names will be read until one is set up. See README.md.
+  No reading engine is installed on the server PC yet. Run <b>Setup MCTM.cmd</b> there once; it installs Tesseract and can add a Gemini key.
 </div>
 {% endif %}
 
@@ -24,54 +31,171 @@
   <section class="panel">
     <form method="post" enctype="multipart/form-data" class="form-grid full" id="scan-form">
       <input type="hidden" name="hint" value="{{ hint_key }}">
-      <label class="dropzone" id="dropzone" for="photo-input" title="Choose or drop a photo of the register page">
+      <label class="dropzone" id="dropzone" for="photo-input" title="Choose or drop up to {{ max_photos }} photos of register pages">
         <span class="dropzone-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/></svg>
         </span>
         <span id="dropzone-hint" hidden></span>
-        <input type="file" name="photo" id="photo-input" accept="image/*" capture="environment" required aria-label="Photo of the register page">
+        {# No capture="environment": with it, phones open the camera for one shot only. #}
+        <input type="file" name="photo" id="photo-input" accept="image/*" multiple required aria-label="Photos of register pages, up to {{ max_photos }}">
       </label>
+      <div class="thumbs" id="thumbs" hidden></div>
+      <p class="inline-error" id="too-many" hidden>{{ max_photos }} photos per batch: the rest weren't added. For more, use Scan a whole folder.</p>
       <div class="field">
         <button class="btn btn-primary" type="submit" id="scan-submit">Scan and review</button>
       </div>
     </form>
   </section>
 
+  <section class="panel folder-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Scan a whole folder</h2>
+      </div>
+    </div>
+    <div class="folder-path">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <code id="folder-path">{{ folder }}</code>
+    </div>
+    {% if running_job %}
+    <p class="folder-count"><b>{{ running_job.done }} of {{ running_job.total }}</b> photos read so far.</p>
+    <div class="form-actions">
+      <a class="btn btn-primary" href="{{ url_for('scan_job', job_id=running_job.id) }}">See progress</a>
+    </div>
+    {% else %}
+    <p class="folder-count">{% if not folder_exists %}This folder no longer exists.{% elif folder_count %}<b>{{ folder_count }}</b> photo{{ '' if folder_count == 1 else 's' }} waiting{% if folder_count > max_folder %}; the oldest {{ max_folder }} are read first{% endif %}.{% else %}No photos in it yet.{% endif %}</p>
+    <div class="form-actions">
+      <form method="post" action="{{ url_for('scan_folder_start') }}" id="folder-scan-form">
+        <input type="hidden" name="hint" value="{{ hint_key }}">
+        <button class="btn btn-primary" type="submit" {{ 'disabled' if not folder_count }}>Scan {{ [folder_count, max_folder]|min if folder_count else '' }} photo{{ '' if folder_count == 1 else 's' }}</button>
+      </form>
+      {% if on_server_pc %}
+      <form method="post" action="{{ url_for('scan_folder_open') }}">
+        <input type="hidden" name="hint" value="{{ hint_key }}">
+        <button class="btn btn-outline" type="submit">Open folder</button>
+      </form>
+      {% endif %}
+      <a class="btn btn-outline" href="{{ url_for('scan', hint=hint_key) }}" title="Count the photos again">Refresh</a>
+    </div>
+    {% endif %}
+    <details class="folder-change">
+      <summary>Use a different folder</summary>
+      <form method="post" action="{{ url_for('scan_folder_settings') }}" class="folder-change-form">
+        <input type="hidden" name="hint" value="{{ hint_key }}">
+        <label for="folder-input" class="sr-only">Folder path on the server PC</label>
+        <input type="text" id="folder-input" name="folder" value="{{ '' if folder_is_default else folder }}" placeholder="e.g. D:\Register photos">
+        <button class="btn btn-outline btn-sm" type="submit">Use this folder</button>
+        {% if not folder_is_default %}<button class="btn btn-outline btn-sm" type="submit" name="reset" value="1">Back to default</button>{% endif %}
+      </form>
+      <p class="small-note">Saved photos move into a "Scanned" folder inside it, so they're never read twice.</p>
+    </details>
+  </section>
+</div>
+
+<div class="grid-2" style="margin-top:20px">
   <section class="panel panel-muted">
     <h2>For a clean read</h2>
-    <p class="panel-sub">Three things make the biggest difference.</p>
     <ol class="tips">
-      <li><b>1</b><span>Keep the page title (for example "Uniform") in the photo. It decides the register.</span></li>
+      <li><b>1</b><span>Keep the page title (for example "Uniform") and the date in the photo. They decide the register and the date.</span></li>
       <li><b>2</b><span>Shoot straight down in flat light, with no shadow across the page.</span></li>
-      <li><b>3</b><span>Handwriting is never read perfectly. You fix names and pick the register on the next screen.</span></li>
+      <li><b>3</b><span>Handwriting is never read perfectly. You fix names, dates and registers on the next screen.</span></li>
     </ol>
   </section>
 </div>
 
 <script>
   (function () {
+    // Each pick ADDS to the batch (a file dialog normally replaces the last
+    // pick), so photos can be chosen a few at a time, up to MAX.
+    const MAX = {{ max_photos }};
     const input = document.getElementById('photo-input');
     const zone = document.getElementById('dropzone');
     const hint = document.getElementById('dropzone-hint');
-    function show() {
-      if (input.files && input.files[0]) {
-        // Only text the drop area ever shows: the chosen file's name.
-        hint.textContent = input.files[0].name;
-        hint.className = 'dropzone-file';
-        hint.hidden = false;
-      }
+    const thumbs = document.getElementById('thumbs');
+    const tooMany = document.getElementById('too-many');
+    const btn = document.getElementById('scan-submit');
+    const IMAGE = /\.(jpe?g|png|webp|heic|heif|bmp|tiff?|gif)$/i;
+    let picked = [];
+    let urls = [];
+
+    function key(f) { return f.name + '|' + f.size + '|' + f.lastModified; }
+
+    function sync() {
+      const dt = new DataTransfer();
+      picked.forEach(function (f) { dt.items.add(f); });
+      input.files = dt.files;          // what the form actually sends
+      input.required = picked.length === 0;
     }
-    input.addEventListener('change', show);
+
+    function add(files) {
+      let left_out = 0;
+      Array.from(files || []).forEach(function (f) {
+        if (!(f.type && f.type.indexOf('image/') === 0) && !IMAGE.test(f.name)) return;
+        if (picked.some(function (p) { return key(p) === key(f); })) return;  // already in the batch
+        if (picked.length >= MAX) { left_out++; return; }
+        picked.push(f);
+      });
+      tooMany.hidden = left_out === 0;
+      render();
+    }
+
+    function remove(i) {
+      picked.splice(i, 1);
+      tooMany.hidden = true;
+      render();
+    }
+
+    function render() {
+      sync();
+      urls.forEach(URL.revokeObjectURL);
+      urls = [];
+      thumbs.innerHTML = '';
+      const n = picked.length;
+      thumbs.hidden = n === 0;
+      hint.hidden = n === 0;
+      hint.className = 'dropzone-file';
+      hint.textContent = n === 1 ? picked[0].name : n + ' of ' + MAX + ' photos';
+      picked.forEach(function (f, i) {
+        const fig = document.createElement('figure');
+        fig.className = 'thumb';
+        const img = document.createElement('img');
+        const url = URL.createObjectURL(f);
+        urls.push(url);
+        img.src = url;
+        img.alt = f.name;
+        fig.appendChild(img);
+        const num = document.createElement('span');
+        num.textContent = i + 1;
+        fig.appendChild(num);
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'thumb-remove';
+        x.setAttribute('aria-label', 'Remove ' + f.name);
+        x.title = 'Remove';
+        x.textContent = '×';
+        x.addEventListener('click', function () { remove(i); });
+        fig.appendChild(x);
+        thumbs.appendChild(fig);
+      });
+      btn.disabled = false;
+      btn.textContent = n > 1 ? 'Scan ' + n + ' photos' : 'Scan and review';
+    }
+
+    input.addEventListener('change', function () { add(input.files); });
     ['dragenter', 'dragover'].forEach(function (ev) {
-      zone.addEventListener(ev, function () { zone.classList.add('is-over'); });
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('is-over'); });
     });
-    ['dragleave', 'drop'].forEach(function (ev) {
-      zone.addEventListener(ev, function () { zone.classList.remove('is-over'); setTimeout(show, 0); });
+    zone.addEventListener('dragleave', function () { zone.classList.remove('is-over'); });
+    zone.addEventListener('drop', function (e) {
+      e.preventDefault();               // add to the batch instead of replacing it
+      zone.classList.remove('is-over');
+      add(e.dataTransfer.files);
     });
-    document.getElementById('scan-form').addEventListener('submit', function () {
-      const btn = document.getElementById('scan-submit');
+    document.getElementById('scan-form').addEventListener('submit', function (e) {
+      const n = picked.length;
+      if (!n) { e.preventDefault(); input.click(); return; }
       btn.disabled = true;
-      btn.textContent = 'Reading the page...';
+      btn.textContent = n > 1 ? 'Reading ' + n + ' photos... this can take a minute' : 'Reading the page...';
     });
   })();
 </script>

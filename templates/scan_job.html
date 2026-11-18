@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Reading photos{% endblock %}
+{% block content %}
+<header class="page-head" data-enter>
+  <div>
+    <p class="eyebrow"><a class="text-link" href="{{ url_for('scan') }}">Scan</a> / Folder</p>
+    <h1>Reading {{ job.total }} photo{{ '' if job.total == 1 else 's' }}</h1>
+  </div>
+</header>
+
+<section class="panel job-panel" aria-live="polite">
+  <div class="job-count"><span id="job-done">{{ job.done }}</span><span class="job-of"> of {{ job.total }}</span></div>
+  <div class="job-track" role="progressbar" aria-valuemin="0" aria-valuemax="{{ job.total }}" aria-valuenow="{{ job.done }}" id="job-bar">
+    <div class="job-fill" id="job-fill" style="width: {{ (job.done / job.total * 100) if job.total else 0 }}%"></div>
+  </div>
+  <p class="small-note mono" style="margin-top:12px">{{ job.folder }}</p>
+</section>
+
+<script>
+  (function () {
+    const total = {{ job.total }};
+    const done = document.getElementById('job-done');
+    const fill = document.getElementById('job-fill');
+    const bar = document.getElementById('job-bar');
+    function poll() {
+      fetch('{{ url_for("scan_job_status", job_id=job.id) }}')
+        .then(function (r) { return r.json(); })
+        .then(function (s) {
+          done.textContent = s.done;
+          fill.style.width = (total ? s.done / total * 100 : 0) + '%';
+          bar.setAttribute('aria-valuenow', s.done);
+          if (s.status === 'running') setTimeout(poll, 1200);
+          else window.location.reload();  // finished (or failed): the server shows the right page
+        })
+        .catch(function () { setTimeout(poll, 3000); });
+    }
+    setTimeout(poll, 800);
+  })();
+</script>
+{% endblock %}

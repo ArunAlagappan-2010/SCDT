@@ -32,6 +32,9 @@ import app as appmod  # noqa: E402
 
 appmod.DB_PATH = TEST_DB
 appmod.UPLOAD_DIR = TMP_DIR
+appmod.SETTINGS_PATH = os.path.join(TMP_DIR, "settings.json")
+appmod.DEFAULT_SCAN_FOLDER = os.path.join(TMP_DIR, "scan-folder")
+appmod.SCAN_JOBS_DIR = os.path.join(TMP_DIR, "scan-jobs")
 appmod.app.config["TESTING"] = True
 
 # Force the deterministic offline OCR path regardless of whatever real Gemini
@@ -683,6 +686,389 @@ def run():
 
     run_find_tests()
     run_roster_tests()
+    run_multi_scan_tests()
+    run_folder_scan_tests()
+
+
+def run_folder_scan_tests():
+    import json as _json
+    import re as _re
+    import time as _time
+    from PIL import Image as _Im
+
+    real_today = date.today()
+    folder = os.path.join(TMP_DIR, "my register photos")
+    os.makedirs(os.path.join(folder, "Scanned"), exist_ok=True)
+
+    def make_photo(path):
+        _Im.new("RGB", (40, 50), "white").save(path)
+
+    # The default folder is created on first use and is empty.
+    r = client.get("/scan")
+    check("folder: scan page shows the folder panel", b"Scan a whole folder" in r.data and b"No photos in it yet" in r.data)
+    check("folder: default folder created", os.path.isdir(appmod.DEFAULT_SCAN_FOLDER))
+    r = client.post("/scan/folder/start", follow_redirects=True)
+    check("folder: empty folder -> clear message, no job", b"There are no photos in" in r.data and not appmod.SCAN_JOBS)
+
+    # Choose another folder.
+    r = client.post("/scan/folder/settings", data={"folder": os.path.join(TMP_DIR, "nope")}, follow_redirects=True)
+    check("folder: a missing folder is refused", b"no folder at" in r.data and appmod.scan_folder_path() != os.path.join(TMP_DIR, "nope"))
+    r = client.post("/scan/folder/settings", data={"folder": f'"{folder}"'}, follow_redirects=True)
+    check("folder: a real folder is remembered (quotes from Explorer's 'Copy as path' are fine)",
+          appmod.scan_folder_path() == os.path.abspath(folder))
+
+    for name in ["c_late.jpg", "a_late.png", "b_uniform.jpg", "d_blurry.jpg"]:
+        make_photo(os.path.join(folder, name))
+        _time.sleep(0.02)  # distinct modified times: oldest first
+    open(os.path.join(folder, "notes.txt"), "w").write("not a photo")
+    make_photo(os.path.join(folder, "Scanned", "old.jpg"))
+    check("folder: only photos directly in the folder count",
+          [os.path.basename(p) for p in appmod.list_folder_photos(folder)] == ["c_late.jpg", "a_late.png", "b_uniform.jpg", "d_blurry.jpg"])
+    r = client.get("/scan")
+    check("folder: scan page counts waiting photos", b"<b>4</b> photos waiting" in r.data and b"Scan 4 photos" in r.data)
+
+    iso = lambda days: (real_today - timedelta(days=days)).isoformat()  # noqa: E731
+    by_source = {
+        "c_late": {"category_guess": "Late Comers", "page_date": iso(1),
+                   "rows": [{"house": "", "name": "Rohan Gupta", "class": "10", "date": ""}]},
+        "a_late": {"category_guess": "Late Comers", "page_date": iso(2),
+                   "rows": [{"house": "", "name": "Diya Patel", "class": "9", "date": ""}]},
+        "b_uniform": {"category_guess": "Uniform", "page_date": iso(3),
+                      "rows": [{"house": "", "name": "Kabir Singh", "class": "9", "date": ""}]},
+    }
+
+    def fake_run_ocr(path):
+        _time.sleep(0.05)
+        key = _re.search(r"_\d\d_(.+)\.\w+$", os.path.basename(path)).group(1)
+        page = by_source.get(key)
+        return (_json.dumps(page), None, None, "gemini") if page else ("", "could not read the photo", None, None)
+
+    real_run_ocr = appmod.run_ocr
+    appmod.run_ocr = fake_run_ocr
+    try:
+        r = client.post("/scan/folder/start", data={"hint": ""})
+        m = _re.search(r"/scan/job/([^/\"?]+)", r.headers.get("Location", ""))
+        check("folder: starting a scan opens its progress page", r.status_code == 302 and m, r.headers.get("Location"))
+        job_id = m.group(1) if m else ""
+        r = client.get(f"/scan/job/{job_id}")
+        check("folder: progress page while reading", r.status_code == 200 and (b"Reading 4 photos" in r.data or b"scan-group" in r.data))
+        r = client.post("/scan/folder/start")
+        check("folder: a second start joins the running batch",
+              appmod.get_job(job_id)["status"] != "running" or job_id in r.headers.get("Location", ""))
+        for _ in range(100):
+            st = client.get(f"/scan/job/{job_id}/status").get_json()
+            if st["status"] != "running":
+                break
+            _time.sleep(0.05)
+        check("folder: status reports progress to the end", st == {"status": "done", "done": 4, "total": 4}, str(st))
+        r = client.get(f"/scan/job/{job_id}")
+        html = r.data.decode()
+        check("folder: review shows every photo, oldest first",
+              html.count('class="panel scan-group"') == 4 and html.index("c_late.jpg") < html.index("a_late.png") < html.index("b_uniform.jpg"))
+        check("folder: review carries the batch id", f'name="job_id" value="{job_id}"' in html)
+        check("folder: the folder itself is untouched until saving", len(appmod.list_folder_photos(folder)) == 4)
+        # The server restarts mid-review: the batch comes back from disk.
+        check("folder: a finished batch is saved to disk", os.path.exists(os.path.join(appmod.SCAN_JOBS_DIR, f"{job_id}.json")))
+        with appmod.scan_jobs_lock:
+            appmod.SCAN_JOBS.clear()
+        r = client.get(f"/scan/job/{job_id}")
+        reloaded = appmod.get_job(job_id)
+        check("folder: after a restart the review still opens", r.status_code == 200
+              and r.data.decode().count('class="panel scan-group"') == 4, r.data[:300])
+        check("folder: reloaded batch keeps dates as dates",
+              reloaded and isinstance(reloaded["groups"][0]["page_date"], date)
+              and all(isinstance(c["row_date"], (date, type(None))) for g in reloaded["groups"] for c in g["candidates"]))
+        check("folder: unknown batch id -> back to Scan with a message",
+              b"no longer available" in client.get("/scan/job/nope", follow_redirects=True).data)
+    finally:
+        appmod.run_ocr = real_run_ocr
+
+    # A bad save keeps the batch and returns to it.
+    r = client.post("/scan/commit", data={"job_id": job_id, "group_category_0": "",
+                                          "row_name": ["Rohan Gupta"], "row_group": ["0"], "row_include": ["0"]})
+    check("folder: a bad save returns to the batch, not a rescan",
+          r.status_code == 302 and f"/scan/job/{job_id}" in r.headers.get("Location", "") and appmod.get_job(job_id))
+
+    # Save photos 0 and 2 (c_late, b_uniform); leave a_late unticked; d_blurry had nothing.
+    before = len(appmod.read_log_rows("LateComers", limit=100000))
+    r = client.post("/scan/commit", data={
+        "job_id": job_id, "logged_by": "FolderTest",
+        "group_category_0": "LateComers", "group_date_0": iso(1),
+        "group_category_1": "LateComers", "group_date_1": iso(2),
+        "group_category_2": "Uniform", "group_date_2": iso(3),
+        "row_name": ["Rohan Gupta", "Diya Patel", "Kabir Singh"], "row_group": ["0", "1", "2"],
+        "row_include": ["0", "2"],
+    }, follow_redirects=True)
+    check("folder: saved rows land in their registers",
+          len(appmod.read_log_rows("LateComers", limit=100000)) == before + 1
+          and any(x.get("LoggedBy") == "FolderTest" for x in appmod.read_log_rows("Uniform", limit=100000)))
+    left = sorted(os.path.basename(p) for p in appmod.list_folder_photos(folder))
+    check("folder: saved photos move to Scanned; the rest wait", left == ["a_late.png", "d_blurry.jpg"], str(left))
+    check("folder: Scanned keeps old files and avoids name clashes",
+          sorted(os.listdir(os.path.join(folder, "Scanned"))) == ["b_uniform.jpg", "c_late.jpg", "old.jpg"])
+    check("folder: message says what moved and what's left", b"2 photos moved to the Scanned folder; 2 still waiting" in r.data)
+    check("folder: a saved batch is closed, on disk too",
+          appmod.get_job(job_id) is None and not os.path.exists(os.path.join(appmod.SCAN_JOBS_DIR, f"{job_id}.json")))
+    check("batch ids can't reach outside the batches folder", appmod.get_job("../../app") is None and appmod._job_file("../x") is None)
+
+    # More than 100 photos: the oldest 100 are read.
+    for i in range(103):
+        make_photo(os.path.join(folder, f"bulk_{i:03d}.jpg"))
+    appmod.run_ocr = lambda path: ("", "skipped in test", None, None)
+    try:
+        r = client.post("/scan/folder/start", follow_redirects=False)
+        job = appmod.get_job(_re.search(r"/scan/job/([^/\"?]+)", r.headers["Location"]).group(1))
+        check("folder: at most 100 photos per batch", job["total"] == 100)
+        for _ in range(200):
+            if job["status"] != "running":
+                break
+            _time.sleep(0.05)
+        check("folder: a 100-photo batch finishes", job["status"] == "done" and job["done"] == 100)
+    finally:
+        appmod.run_ocr = real_run_ocr
+
+    client.post("/scan/folder/settings", data={"reset": "1"})
+    check("folder: back to the default folder", appmod.scan_folder_path() == appmod.DEFAULT_SCAN_FOLDER)
+
+
+def run_multi_scan_tests():
+    import json as _json
+    import re as _re
+    T = date(2026, 11, 18)
+    prd = lambda s: appmod.parse_register_date(s, today=T)  # noqa: E731
+
+    # --- reading dates ---------------------------------------------------
+    check("date: 18/11/2026", prd("18/11/2026") == date(2026, 11, 18))
+    check("date: day first (05/11/2026 is 5 Nov)", prd("05/11/2026") == date(2026, 11, 5))
+    check("date: 2-digit year 18-11-26", prd("18-11-26") == date(2026, 11, 18))
+    check("date: dots 18.11.2026", prd("18.11.2026") == date(2026, 11, 18))
+    check("date: ISO 2026-11-18", prd("2026-11-18") == date(2026, 11, 18))
+    check("date: 18th November", prd("18th November") == date(2026, 11, 18))
+    check("date: 18 Nov 2026", prd("Date: 18 Nov 2026") == date(2026, 11, 18))
+    check("date: Nov 18, 2026", prd("Nov 18, 2026") == date(2026, 11, 18))
+    check("date: no year 18/11", prd("18/11") == date(2026, 11, 18))
+    check("date: no year in the future means last year", prd("20/12") == date(2025, 12, 20))
+    check("date: a future date is a misread", prd("25/12/2026") is None)
+    check("date: an arrival time is not a date", prd("8.45") is None and prd("8:45 AM") is None)
+    check("date: nonsense is None", prd("Rohan Gupta") is None and prd("") is None and prd(None) is None)
+
+    # --- Tesseract text: date headings and per-row dates -------------------
+    students = appmod.get_master_students()
+    real_today = date.today()
+    d1 = (real_today - timedelta(days=3)).strftime("%d/%m/%Y")
+    d2 = (real_today - timedelta(days=1)).strftime("%d/%m/%Y")
+    lines = appmod.parse_ocr_lines(f"Date: {d1}\nKailash   Rohan Gupta   10\n{d2}\nAravali   Diya Patel   9", students)
+    check("tesseract: date-only lines are not students", len(lines) == 2, str(lines))
+    check("tesseract: rows take the date heading above them",
+          lines and lines[0]["row_date"] == real_today - timedelta(days=3) and lines[1]["row_date"] == real_today - timedelta(days=1), str(lines))
+    check("tesseract: page date from the top of the page",
+          appmod.page_date_from_text(f"UNIFORM REGISTER\nDate: {d1}\nRohan Gupta") == real_today - timedelta(days=3))
+    lines = appmod.parse_ocr_lines(f"Kailash   Rohan Gupta   10   {d2}", students)
+    check("tesseract: a date in the row is that row's date", lines and lines[0]["row_date"] == real_today - timedelta(days=1)
+          and lines[0]["guess_name"] == "Rohan Gupta", str(lines))
+
+    # --- several photos at once, with a fake OCR engine --------------------
+    iso = lambda days: (real_today - timedelta(days=days)).isoformat()  # noqa: E731
+    pages = {
+        "01": {"category_guess": "Late Comers", "page_date": iso(2),
+               "rows": [{"house": "", "name": "Rohan Gupta", "class": "10", "date": ""},
+                        {"house": "", "name": "Diya Patel", "class": "9", "date": iso(4)}]},
+        "02": {"category_guess": "Uniform", "page_date": "",
+               "rows": [{"house": "", "name": "Kabir Singh", "class": "9", "date": iso(5)}]},
+        "03": None,  # unreadable photo
+    }
+
+    def fake_run_ocr(path):
+        n = _re.search(r"scan_\d+_\d+_(\d\d)_", os.path.basename(path)).group(1)
+        page = pages.get(n)
+        if page is None:
+            return "", "could not read the photo", None, None
+        return _json.dumps(page), None, None, "gemini"
+
+    def photo(name):
+        from PIL import Image as _Im
+        b = io.BytesIO()
+        _Im.new("RGB", (40, 50), "white").save(b, format="PNG")
+        b.seek(0)
+        return (b, name)
+
+    real_run_ocr = appmod.run_ocr
+    appmod.run_ocr = fake_run_ocr
+    try:
+        r = client.post("/scan", data={"photo": [photo("a.png"), photo("b.png"), photo("c.png")], "hint": "Defaulters"},
+                        content_type="multipart/form-data")
+        html = r.data.decode()
+        check("multi scan: page loads", r.status_code == 200)
+        check("multi scan: one section per photo", html.count('class="panel scan-group"') == 3, html[-1500:])
+        check("multi scan: register read per photo", 'name="group_category_0" value="LateComers"' in html
+              and 'name="group_category_1" value="Uniform"' in html)
+        check("multi scan: page date read from the photo", f'name="group_date_0" class="group-date-input" value="{iso(2)}"' in html)
+        check("multi scan: no page date -> most common row date",
+              f'name="group_date_1" class="group-date-input" value="{iso(5)}"' in html)
+        check("multi scan: a row's own date is filled in", f'name="row_date" value="{iso(4)}"' in html)
+        check("multi scan: unreadable photo says so, others still shown",
+              "Nothing could be read from this photo" in html and "could not read the photo" in html)
+        check("multi scan: rows are numbered across photos", 'name="row_include" value="2"' in html)
+        thumbs = _re.findall(r'src="(/scan/photo/[^"]+)"', html)
+        check("multi scan: thumbnails served", thumbs and client.get(thumbs[0]).status_code == 200, str(thumbs))
+
+        many = [photo(f"p{i}.png") for i in range(12)]
+        r = client.post("/scan", data={"photo": many}, content_type="multipart/form-data")
+        check("multi scan: more than 10 photos -> only 10 read, with a message",
+              r.data.decode().count('class="panel scan-group"') == 10 and b"only the first 10 were read" in r.data)
+    finally:
+        appmod.run_ocr = real_run_ocr
+
+    # --- saving several photos ---------------------------------------------
+    before = {k: len(appmod.read_log_rows(k, limit=100000)) for k in ("LateComers", "Uniform")}
+    r = client.post("/scan/commit", data={
+        "logged_by": "MultiTest",
+        "group_category_0": "LateComers", "group_date_0": iso(2),
+        "group_category_1": "Uniform", "group_date_1": iso(5),
+        "row_name": ["Rohan Gupta", "Diya Patel", "Kabir Singh"],
+        "row_student_id": ["", "", ""], "row_house": ["", "", ""], "row_class": ["", "", ""], "row_remarks": ["", "", ""],
+        "row_group": ["0", "0", "1"],
+        "row_date": ["", iso(4), ""],
+        "row_include": ["0", "1", "2"],
+    }, follow_redirects=True)
+    late = [x for x in appmod.read_log_rows("LateComers", limit=100000) if x.get("LoggedBy") == "MultiTest"]
+    uni = [x for x in appmod.read_log_rows("Uniform", limit=100000) if x.get("LoggedBy") == "MultiTest"]
+    check("multi save: rows go to each photo's register",
+          len(late) == 2 and len(uni) == 1 and len(appmod.read_log_rows("Uniform", limit=100000)) == before["Uniform"] + 1)
+    check("multi save: page date and row date both used",
+          {(x["Name"], appmod._row_date(x)) for x in late} == {("Rohan Gupta", real_today - timedelta(days=2)), ("Diya Patel", real_today - timedelta(days=4))}
+          and appmod._row_date(uni[0]) == real_today - timedelta(days=5), str(late + uni))
+    check("multi save: message lists both registers", b"in Late Comers" in r.data and b"in Uniform" in r.data)
+
+    n_late = len(appmod.read_log_rows("LateComers", limit=100000))
+    r = client.post("/scan/commit", data={
+        "group_category_0": "LateComers", "group_date_0": iso(1), "group_category_1": "",
+        "row_name": ["Rohan Gupta", "Kabir Singh"], "row_group": ["0", "1"], "row_include": ["0", "1"],
+    }, follow_redirects=True)
+    check("multi save: a photo with no register -> nothing saved at all",
+          len(appmod.read_log_rows("LateComers", limit=100000)) == n_late and b"Nothing was saved" in r.data)
+    future = (real_today + timedelta(days=3)).isoformat()
+    r = client.post("/scan/commit", data={
+        "group_category_0": "LateComers", "group_date_0": iso(1),
+        "row_name": ["Rohan Gupta", "Diya Patel"], "row_group": ["0", "0"], "row_date": ["", future], "row_include": ["0", "1"],
+    }, follow_redirects=True)
+    check("multi save: a future row date -> nothing saved",
+          len(appmod.read_log_rows("LateComers", limit=100000)) == n_late and b"Diya Patel" in r.data)
+
+    # --- matching scanned names to students --------------------------------
+    roster = [
+        {"id": "S1", "name": "Samyuktha (7)", "class": "7", "section": "", "house": "Kailash"},
+        {"id": "S2", "name": "Samyuktha (9)", "class": "9", "section": "", "house": "Vindhyas"},
+        {"id": "S3", "name": "Arun Alagappan", "class": "IB-1", "section": "A", "house": "Kailash"},
+        {"id": "S4", "name": "Tarun", "class": "6", "section": "", "house": "Aravallis"},
+        {"id": "S5", "name": "Aditya Prasanna", "class": "IB-2", "section": "", "house": "Vindhyas"},
+    ]
+    ms = lambda n, k="": (appmod.match_student(n, k, roster) or {}).get("id")  # noqa: E731
+    check("match: small misread still matches", ms("Arun Alagapan") == "S3")
+    check("match: a stranger matches nobody", ms("Mystery Person", "8") is None)
+    check("match: same name, class on the page decides", ms("Samyuktha", "9") == "S2" and ms("Samyuktha", "7") == "S1")
+    check("match: same name, no class -> left for a person", ms("Samyuktha") is None)
+    check("match: IB class written as IB-1A", ms("Arun Alagappan", "IB-1A") == "S3")
+    check("match: a short name one letter off is a different child", ms("Arun") is None and ms("Tarun") == "S4")
+    check("match: unmatched rows are left unticked",
+          appmod._make_candidate("x", "", "Mystery Person", "8", roster)["confident"] is False)
+
+    # --- Tesseract text where the column gaps collapsed to single spaces ---
+    roster2 = roster + [
+        {"id": "S6", "name": "Akileash", "class": "9", "section": "", "house": "Kailash"},
+        {"id": "S7", "name": "Keyaashini", "class": "6", "section": "", "house": "Aravallis"},
+    ]
+    one = lambda ln: appmod.parse_ocr_lines(ln, roster2)[0]  # noqa: E731
+    c = one("Kailash ArunAlagappan IB-1A")
+    check("tesseract: a merged name is found inside the line", c["student_id"] == "S3" and c["guess_house"] == "Kailash", str(c))
+    check("tesseract: 'Samyuktha 9' run together is Samyuktha (9)", one("Vindhyas Samyuktha 9")["student_id"] == "S2")
+    check("tesseract: the class after the name decides", one("Kailash Samyuktha 7")["student_id"] == "S1")
+    check("tesseract: a house is never taken for a name (Kailash ~ Akileash)",
+          one("Kailash Mystery Person 8")["student_id"] == "" and one("Kailash Akileash 9")["student_id"] == "S6")
+    check("tesseract: OCR specks don't break the split", one("Aravallis Keyaashini | 6")["student_id"] == "S7")
+    check("tesseract: title with a date and full stop is recognised",
+          appmod.guess_category_from_text_lines("LATE COMERS. Date: 17/11/2026\nKailash Arun 9") == "LateComers")
+
+    # --- capitals, sound-alike spellings, houses -------------------------------
+    roster3 = roster2 + [
+        {"id": "S8", "name": "Achyut", "class": "6", "section": "", "house": "Kailash"},
+        {"id": "S9", "name": "Gowtham Karthik", "class": "IB-1", "section": "A", "house": ""},
+        {"id": "S10", "name": "Siddharth Kannan", "class": "IB-1", "section": "B", "house": "Aravallis"},
+        {"id": "S11", "name": "Siddarth Kannan", "class": "IB-1", "section": "B", "house": "Aravallis"},
+        {"id": "S12", "name": "Kabir", "class": "9", "section": "", "house": "Nilgiris"},
+        {"id": "S13", "name": "Vindhya Rao", "class": "8", "section": "", "house": "Vindhyas"},
+    ]
+    m3 = lambda n, k="": (appmod.match_student(n, k, roster3) or {}).get("id")  # noqa: E731
+    check("capitals never matter", m3("ACHYUT") == "S8" and m3("arun alagappan") == "S3")
+    check("sound-alike at 90%+: Achit -> Achyut", m3("ACHIT", "6") == "S8" and appmod.sound_score("achit", "achyut") >= 0.9)
+    check("sound-alike: Gautham -> Gowtham", m3("GAUTHAM KARTHIK") == "S9" and m3("Gautham Karthik", "IB-1A") == "S9")
+    check("sound-alike: Kabeer -> Kabir", m3("KABEER") == "S12")
+    check("not sound-alike enough: Arun is not Tarun", appmod.sound_score("arun", "tarun") < 0.9 and m3("Arun") is None)
+    check("exact spelling wins over a one-letter classmate",
+          m3("Siddarth Kannan") == "S11" and m3("SIDDHARTH KANNAN") == "S10")
+    check("a misread between two near-identical classmates is left for a person", m3("Sidarth Kannan", "IB-1B") is None)
+    check("a house word in the name column matches nobody", m3("Kailash") is None and m3("VINDYAS") is None)
+    check("houses: spelling variants become the real house",
+          [appmod.match_house(h, roster3) for h in ("VINDYAS", "Aravali", "NILGIRI", "kailas")] == ["Vindhyas", "Aravallis", "Nilgiris", "Kailash"])
+    check("houses: an unknown house is kept, capitals tidied", appmod.match_house("RED HOUSE", roster3) == "Red House")
+    c = appmod._make_candidate("x", "VINDYAS", "MYSTERY PERSON", "8", roster3)
+    check("unmatched rows show tidy capitals and the real house, unticked",
+          c["guess_name"] == "Mystery Person" and c["guess_house"] == "Vindhyas" and not c["confident"], str(c))
+    check("names with lower case are left as written", appmod.tidy_caps("McDonald") == "McDonald")
+
+    # --- Gemini first, Tesseract as the fallback ----------------------------
+    saved = (appmod.USING_GEMINI, appmod.OCR_AVAILABLE)
+    try:
+        appmod.USING_GEMINI, appmod.OCR_AVAILABLE = True, True
+        check("engine label: Gemini primary with Tesseract backup", appmod.ocr_backend_label() == "Gemini (cloud) · Tesseract backup")
+        r = client.get("/scan")
+        check("scan page: no 'Add Gemini key' button once a key is set", b"Add Gemini key" not in r.data)
+        appmod.USING_GEMINI = False
+        check("engine label: Tesseract only without a key", appmod.ocr_backend_label() == "Tesseract (offline)")
+        r = client.get("/scan")
+        check("scan page: offers 'Add Gemini key' on the server PC", b"Add Gemini key" in r.data)
+        opened = []
+        real_open = appmod._open_file_on_server
+        appmod._open_file_on_server = lambda path: opened.append(path)
+        try:
+            r = client.post("/scan/gemini-key", follow_redirects=True)
+        finally:
+            appmod._open_file_on_server = real_open
+        check("'Add Gemini key' opens SETUP_GEMINI_KEY.bat on the server PC",
+              opened and opened[0].endswith("SETUP_GEMINI_KEY.bat") and b"Paste the key" in r.data, str(opened))
+    finally:
+        appmod.USING_GEMINI, appmod.OCR_AVAILABLE = saved
+
+    # --- saving a whole scan in one write ------------------------------------
+    before = {k: len(appmod.read_log_rows(k, 100000)) for k in ("LateComers", "Uniform")}
+    batch = [("LateComers", {"Date": real_today, "Name": "Rohan Gupta"}),
+             ("Uniform", {"Date": real_today, "Name": "Diya Patel", "Issue": "No tie"}),
+             ("LateComers", {"Date": real_today, "Name": "Kabir Singh"})]
+    ids = appmod.append_log_entries(batch, "BatchTest", "OCR")
+    after = {k: len(appmod.read_log_rows(k, 100000)) for k in ("LateComers", "Uniform")}
+    check("batch save: every row written, ids unique",
+          len(set(ids)) == 3 and after == {"LateComers": before["LateComers"] + 2, "Uniform": before["Uniform"] + 1}, str(ids))
+    real_save = appmod.save_wb
+    def locked(_wb):
+        raise appmod.WorkbookLocked()
+    appmod.save_wb = locked
+    try:
+        try:
+            appmod.append_log_entries(batch, "BatchTest", "OCR")
+            raised = False
+        except appmod.WorkbookLocked:
+            raised = True
+    finally:
+        appmod.save_wb = real_save
+    check("batch save: Excel holding the file -> nothing written at all",
+          raised and {k: len(appmod.read_log_rows(k, 100000)) for k in ("LateComers", "Uniform")} == after)
+
+    # --- upload safety -----------------------------------------------------
+    name = appmod.safe_upload_name("../../windows/evil name.exe", 0)
+    check("upload name can't leave the scans folder", "/" not in name and "\\" not in name and ".." not in name
+          and name.endswith(".jpg"), name)
+    check("photo route refuses odd names", client.get("/scan/photo/..%2Fapp.py").status_code == 404
+          and client.get("/scan/photo/app.py").status_code == 404)
 
 
 def run_roster_tests():

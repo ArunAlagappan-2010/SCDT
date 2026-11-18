@@ -5,7 +5,6 @@
   <div>
     <p class="eyebrow">{{ today.strftime('%A, %d %B %Y') }}</p>
     <h1>MCTM Dashboard</h1>
-    <p class="subtitle">Discipline and grooming cases across all four registers, counted live from the Excel database.</p>
   </div>
   <div class="head-actions">
     <div class="period-toggle" role="group" aria-label="Period">
@@ -14,6 +13,37 @@
     </div>
   </div>
 </header>
+
+{% set g = stats.glance %}
+<section class="glance" aria-label="At a glance">
+  <div class="glance-tile">
+    <span class="glance-label">Today</span>
+    <span class="glance-num">{{ g.today }}</span>
+  </div>
+  <div class="glance-tile">
+    <span class="glance-label">This week</span>
+    <span class="glance-num">{{ g.week }}</span>
+  </div>
+  <div class="glance-tile">
+    <span class="glance-label">This month</span>
+    <span class="glance-num">{{ g.month }}</span>
+    {% if g.month_change is not none %}
+    <span class="glance-change {{ 'is-up' if g.month_change > 0 else 'is-down' if g.month_change < 0 else '' }}">
+      {{ '&#9650;'|safe if g.month_change > 0 else '&#9660;'|safe if g.month_change < 0 else '' }} {{ g.month_change|abs }}% vs last month
+    </span>
+    {% endif %}
+  </div>
+  <div class="glance-tile">
+    <span class="glance-label">Students this month</span>
+    <span class="glance-num">{{ g.students_month }}<small> / {{ g.students_total }}</small></span>
+    <span class="glance-change">{{ g.share_month }}% of the school</span>
+  </div>
+  <div class="glance-tile">
+    <span class="glance-label">All time</span>
+    <span class="glance-num">{{ g.all_time }}</span>
+    <span class="glance-change">{{ stats.scanned_share }}% from scans</span>
+  </div>
+</section>
 
 <section class="category-grid" aria-label="Cases by register">
   {% for key, cfg in categories.items() %}
@@ -49,11 +79,45 @@
 </section>
 
 <div class="grid-2">
+  <section class="panel" style="margin-bottom:0">
+    <h2>Last 30 days</h2>
+    {% if stats.daily|selectattr('count')|list %}
+    <div class="day-chart" role="img" aria-label="Entries per day over the last 30 days">
+      {% for d in stats.daily %}
+      <div class="day-col {{ 'is-weekend' if d.weekend }}" title="{{ d.title }}">
+        <div class="day-bar {{ 'is-empty' if not d.count }}" style="height: {{ d.pct if d.count else 2 }}%"></div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="day-labels" aria-hidden="true">
+      {% for d in stats.daily %}<span>{{ d.label if loop.index0 % 5 == 0 or loop.last else '' }}</span>{% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>Nothing in the last 30 days</strong></div>
+    {% endif %}
+  </section>
+
+  <section class="panel" style="margin-bottom:0">
+    <h2>By day of week</h2>
+    {% if stats.by_weekday|selectattr('count')|list %}
+      {% for w in stats.by_weekday %}
+      <div class="bar-row">
+        <span>{{ w.label }}</span>
+        <div class="bar-track"><div class="bar-fill" style="width: {{ w.pct }}%;"></div></div>
+        <span>{{ w.count }}</span>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state"><strong>No entries yet</strong></div>
+    {% endif %}
+  </section>
+</div>
+
+<div class="grid-2" style="margin-top:20px">
   <section class="panel">
     <div class="panel-head">
       <div>
         <h2>Patterns</h2>
-        <p class="panel-sub">What stands out in the registers, most urgent first.</p>
       </div>
     </div>
     {% if stats.patterns %}
@@ -73,7 +137,6 @@
     {% else %}
     <div class="empty-state">
       <strong>No patterns yet</strong>
-      <p>Patterns show up here once a few weeks of entries are logged.</p>
     </div>
     {% endif %}
   </section>
@@ -81,7 +144,6 @@
   <div class="stack" style="margin-bottom:0">
     <section class="panel" style="margin-bottom:0">
       <h2>By house</h2>
-      <p class="panel-sub">All entries, every register.</p>
       {% if stats.house_breakdown %}
         {% for h in stats.house_breakdown %}
         <div class="bar-row">
@@ -91,15 +153,14 @@
         </div>
         {% endfor %}
       {% else %}
-        <div class="empty-state"><p>No entries with a house yet.</p></div>
+        <div class="empty-state"><strong>No entries yet</strong></div>
       {% endif %}
     </section>
 
     <section class="panel" style="margin-bottom:0">
       <h2>Flagged students per week</h2>
-      <p class="panel-sub">Different students logged 3+ times in one week.</p>
       {% if not (stats.weekly_flag_chart|selectattr('count')|list) %}
-      <div class="empty-state"><p>No student has hit 3 entries in a week in the last 10 weeks.</p></div>
+      <div class="empty-state"><strong>Nobody flagged in the last 10 weeks</strong></div>
       {% else %}
       <div class="week-chart">
         {% for w in stats.weekly_flag_chart %}
@@ -117,11 +178,72 @@
   </div>
 </div>
 
+<div class="grid-2" style="margin-top:20px">
+  <section class="panel" style="margin-bottom:0">
+    <h2>Most logged students, {{ stats.current_year }}</h2>
+    {% if stats.top_students %}
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Student</th><th>Class</th><th>House</th><th class="num">Times</th>
+          {% for k, c in categories.items() %}<th class="num">{{ c.label }}</th>{% endfor %}
+          <th>Last</th></tr>
+      </thead>
+      <tbody>
+        {% for t in stats.top_students %}
+        <tr>
+          <td class="muted-cell">{{ loop.index }}</td>
+          <td class="name-cell"><a class="student-link" href="{{ student_url(t.name) }}">{{ t.name }}</a></td>
+          <td class="nowrap">{{ t['class'] }}</td>
+          <td>{{ t.house }}</td>
+          <td class="num"><span class="count-pill {{ 'count-pill-soft' if t.count < 3 }}">{{ t.count }}</span></td>
+          {% for k in categories %}<td class="num {{ 'zero' if not t.by[k] }}">{{ t.by[k] }}</td>{% endfor %}
+          <td class="nowrap mono" style="font-size:12.5px">{{ t.last.strftime('%d %b') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>No entries this year</strong></div>
+    {% endif %}
+  </section>
+
+  <div class="stack" style="margin-bottom:0">
+    <section class="panel" style="margin-bottom:0">
+      <h2>By class</h2>
+      {% if stats.by_class %}
+        {% for c in stats.by_class %}
+        <div class="bar-row">
+          <span>{{ c.label }}</span>
+          <div class="bar-track"><div class="bar-fill" style="width: {{ c.pct }}%;"></div></div>
+          <span>{{ c.count }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state"><strong>No entries yet</strong></div>
+      {% endif %}
+    </section>
+
+    {% if stats.late_timed %}
+    <section class="panel" style="margin-bottom:0">
+      <h2>Late arrival times <span class="mono" style="color:var(--muted);font-size:13px">usually {{ stats.late_median }}</span></h2>
+      {% for s in stats.late_slots %}
+      <div class="bar-row">
+        <span class="mono" style="font-size:13px">{{ s.label }}</span>
+        <div class="bar-track"><div class="bar-fill" style="width: {{ s.pct }}%;"></div></div>
+        <span>{{ s.count }}</span>
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+  </div>
+</div>
+
 <section class="panel" style="margin-top:20px">
   <div class="panel-head">
     <div>
       <h2>Repeated 3+ times in the same week</h2>
-      <p class="panel-sub">Students with three or more entries, any register, inside one calendar week.</p>
     </div>
   </div>
   {% if stats.weekly_flags %}
@@ -149,7 +271,6 @@
   {% else %}
   <div class="empty-state">
     <strong>Nobody flagged yet</strong>
-    <p>No student has been logged 3 or more times in a single week.</p>
   </div>
   {% endif %}
 </section>

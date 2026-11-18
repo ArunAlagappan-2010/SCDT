@@ -5,7 +5,6 @@
   <div>
     <p class="eyebrow">Register</p>
     <h1>{{ cfg.label }}</h1>
-    <p class="subtitle">Log a case by hand, or scan a photo of the paper register page.</p>
   </div>
   <nav class="tabs" aria-label="Entry method">
     <a class="active" aria-current="page" href="{{ url_for('entry', key=key) }}">Manual entry</a>
@@ -15,7 +14,6 @@
 
 <section class="panel">
   <h2>New entry</h2>
-  <p class="panel-sub">Type a name or student ID. Class, section and house fill in from the master list.</p>
   <form method="post" class="form-grid three">
     {% include "_entry_fields.html" %}
     <div class="field span-all form-actions">
@@ -29,7 +27,6 @@
   <div class="panel-head">
     <div>
       <h2>All {{ cfg.label }} entries <span class="mono" style="color:var(--muted);font-size:15px">{{ rows|length }}{{ '+' if rows|length >= max_shown else '' }}</span></h2>
-      <p class="panel-sub">Newest first. Edit or delete any row.</p>
     </div>
     <input type="search" id="entry-filter" class="filter-input" placeholder="Filter by name, ID, date" aria-label="Filter entries">
   </div>
@@ -73,7 +70,6 @@
   {% else %}
   <div class="empty-state">
     <strong>Nothing logged yet</strong>
-    <p>Entries saved above, or from a scanned register page, appear here.</p>
     <a class="btn btn-outline btn-sm" href="{{ url_for('scan', hint=key) }}">Scan a register page</a>
   </div>
   {% endif %}

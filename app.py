@@ -18,6 +18,7 @@ import json
 import time
 import base64
 import difflib
+import shutil
 import threading
 from collections import Counter
 from datetime import datetime, date, timedelta, time as clock_time
@@ -42,14 +43,32 @@ app.secret_key = "school-discipline-tracker-local-only"
 wb_lock = threading.RLock()
 
 # --- OCR backend #1: Tesseract (offline, free, default) ---------------------
-# Optional: point pytesseract at the Tesseract engine if it's not on PATH.
+# pytesseract is only a Python wrapper: the Tesseract program itself must be
+# installed too (Setup MCTM.cmd does it). Look in the usual install folders,
+# then on PATH; OCR counts as available only when the program is really there.
 TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSERACT_CANDIDATES = [
+    TESSERACT_CMD,
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Tesseract-OCR", "tesseract.exe"),
+]
+
+
+def find_tesseract():
+    for path in TESSERACT_CANDIDATES:
+        if path and os.path.exists(path):
+            return path
+    return shutil.which("tesseract")
+
+
 try:
     import pytesseract
-    if os.path.exists(TESSERACT_CMD):
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-    OCR_AVAILABLE = True
+    TESSERACT_PATH = find_tesseract()
+    if TESSERACT_PATH:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+    OCR_AVAILABLE = bool(TESSERACT_PATH)
 except ImportError:
+    TESSERACT_PATH = None
     OCR_AVAILABLE = False
 
 # --- OCR backend #2: Gemini (needs internet + a free API key, better on
@@ -169,11 +188,21 @@ def _gemini_ocr_prompt():
         "7. Return the rows in the same top-to-bottom order they appear on the "
         "page, one JSON object per student row -- never merge two students into "
         "one row or split one student into two.\n\n"
+        "DATES:\n"
+        "8. If the page shows a date for the whole page (in the title, heading or "
+        "a 'Date:' line), return it as page_date. If the table has a Date column, "
+        "or a date is written beside a row, return it as that row's date. If dates "
+        "are written once and the rows under them belong to it (a new date heading "
+        "partway down the page), give each row the date it sits under. Write dates "
+        "as YYYY-MM-DD when you can read day, month and year; the register is from "
+        "India, so 05/11 means 5 November. If you can only read part of a date, "
+        "write it exactly as it appears. Use an empty string when there is no date.\n\n"
         "If a value is missing or unreadable for a real row, use an empty string "
         "for that field, but still include the row if at least the name is readable. "
         "Respond with ONLY a raw JSON object, no markdown code fences, no commentary, "
         "in exactly this shape: "
-        '{"category_guess": "...", "rows": [{"house": "...", "name": "...", "class": "..."}, ...]}'
+        '{"category_guess": "...", "page_date": "...", "rows": [{"house": "...", "name": "...", '
+        '"class": "...", "date": "..."}, ...]}'
     )
 
 
@@ -231,26 +260,79 @@ def parse_entry_date(raw):
     return d, None
 
 
-def get_master_students():
-    """Returns list of dicts for every student in MasterList."""
-    with wb_lock:
-        wb = open_wb()
-        ws = wb["MasterList"]
+# Reading the workbook takes ~0.3 s, and every page and every keystroke in a
+# name search needs it. So it is read once and reused until the file changes
+# on disk (any save -- the app's own or Excel's -- changes its timestamp).
+_snapshot_cache = {"key": None, "data": None}
+_snapshot_lock = threading.Lock()
+
+
+def _db_stamp():
+    st = os.stat(DB_PATH)
+    return (os.path.abspath(DB_PATH), st.st_mtime_ns, st.st_size)
+
+
+def _read_snapshot():
+    """Students and every register's rows, from one read-only pass."""
+    wb = load_workbook(DB_PATH, read_only=True)
+    try:
         students = []
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=False):
-            sid = row[0].value
-            name = row[1].value
+        for row in wb["MasterList"].iter_rows(min_row=2, max_col=6, values_only=True):
+            row = tuple(row) + (None,) * (6 - len(row))
+            sid, name = row[0], row[1]
             if not sid or not name:
                 continue
             students.append({
-                "id": sid,
-                "name": name,
-                "class": row[2].value or "",
-                "section": row[3].value or "",
-                "roll": row[4].value or "",
-                "house": (row[5].value or "") if len(row) > 5 else "",
+                "id": sid, "name": name,
+                "class": row[2] or "", "section": row[3] or "", "roll": row[4] or "", "house": row[5] or "",
             })
-        return students
+        registers = {}
+        for key in CATEGORIES:
+            cols = sheet_columns(key)
+            rows = []
+            if key in wb.sheetnames:
+                for values in wb[key].iter_rows(min_row=2, max_col=len(cols), values_only=True):
+                    if not values or not values[0]:
+                        continue
+                    values = tuple(values) + (None,) * (len(cols) - len(values))
+                    # openpyxl round-trips empty-string writes as None; normalize back to "".
+                    rows.append({c: ("" if v is None else v) for c, v in zip(cols, values)})
+            rows.sort(key=lambda row: (row.get("Date") or date.min, row.get("EntryID") or ""), reverse=True)
+            registers[key] = rows
+        # One spelling per house and class everywhere in the app
+        # ("ARAVALLIS" -> Aravallis, "IB2" / "1B2" -> IB-2, "Grade 6" -> 6).
+        canon, canon_cls = {}, {}
+        for rows in registers.values():
+            for row in rows:
+                raw = str(row.get("House") or "")
+                if raw not in canon:
+                    canon[raw] = match_house(raw, students)
+                row["House"] = canon[raw]
+                raw_cls = (str(row.get("Class") or ""), str(row.get("Section") or ""))
+                if raw_cls not in canon_cls:
+                    canon_cls[raw_cls] = match_class(raw_cls[0], raw_cls[1], students)
+                row["Class"], row["Section"] = canon_cls[raw_cls]
+        return {"students": students, "registers": registers}
+    finally:
+        wb.close()
+
+
+def _snapshot():
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(f"Database not found at {DB_PATH}. Run build_excel_template.py first.")
+    with _snapshot_lock:
+        stamp = _db_stamp()
+        if _snapshot_cache["key"] != stamp:
+            with wb_lock:
+                data = _read_snapshot()
+                stamp = _db_stamp()  # the file can't have changed while wb_lock was held by us
+            _snapshot_cache["key"], _snapshot_cache["data"] = stamp, data
+        return _snapshot_cache["data"]
+
+
+def get_master_students():
+    """Returns list of dicts for every student in MasterList."""
+    return [dict(s) for s in _snapshot()["students"]]
 
 
 def find_student_by_name(name, students=None):
@@ -375,7 +457,7 @@ def _entry_row_values(key, values_by_header, logged_by, students):
         "Name": match["name"] if match else values_by_header.get("Name", ""),
         "Class": match["class"] if match else values_by_header.get("Class", ""),
         "Section": match["section"] if match else values_by_header.get("Section", ""),
-        "House": match["house"] if match else values_by_header.get("House", ""),
+        "House": (match["house"] if match and match["house"] else match_house(values_by_header.get("House", ""), students)),
         "Remarks": values_by_header.get("Remarks", ""),
         "LoggedBy": logged_by or "",
     }
@@ -386,22 +468,32 @@ def _entry_row_values(key, values_by_header, logged_by, students):
 
 def append_log_entry(key, values_by_header, logged_by, source):
     """values_by_header: dict covering Date, Name (or StudentID), <extra fields>, Remarks."""
-    cols = sheet_columns(key)
-    row_values = _entry_row_values(key, values_by_header, logged_by, get_master_students())
+    return append_log_entries([(key, values_by_header)], logged_by, source)[0]
 
+
+def append_log_entries(items, logged_by, source):
+    """Writes many entries -- [(register key, values_by_header), ...] -- with
+    ONE open and ONE save of the workbook. Saving the workbook takes seconds,
+    so a 500-row scan saved row by row took the best part of an hour; this way
+    it takes as long as a single entry. All or nothing: if the file can't be
+    saved (open in Excel), none of the rows are written. Returns the new IDs."""
+    students = get_master_students()
+    prepared = [(key, _entry_row_values(key, values, logged_by, students)) for key, values in items]
     with wb_lock:
         wb = open_wb()
-        ws = wb[key]
-        r = next_log_row(ws)
-        entry_id = next_log_entry_id(ws, key)
-        row_values["EntryID"] = entry_id
-        row_values["Source"] = source
-
-        for c, header in enumerate(cols, start=1):
-            ws.cell(row=r, column=c, value=row_values.get(header, ""))
-
-        save_wb(wb)
-        return entry_id
+        ids = []
+        for key, row_values in prepared:
+            ws = wb[key]
+            r = next_log_row(ws)
+            entry_id = next_log_entry_id(ws, key)
+            row_values["EntryID"] = entry_id
+            row_values["Source"] = source
+            for c, header in enumerate(sheet_columns(key), start=1):
+                ws.cell(row=r, column=c, value=row_values.get(header, ""))
+            ids.append(entry_id)
+        if ids:
+            save_wb(wb)
+        return ids
 
 
 def _find_log_row(ws, entry_id):
@@ -465,23 +557,8 @@ def delete_log_entry(key, entry_id):
 
 
 def read_log_rows(key, limit=200):
-    cols = sheet_columns(key)
-    with wb_lock:
-        wb = open_wb()
-        ws = wb[key]
-        rows = []
-        for r in range(2, ws.max_row + 1):
-            entry_id = ws.cell(row=r, column=1).value
-            if not entry_id:
-                continue
-            row = {}
-            for c in range(1, len(cols) + 1):
-                v = ws.cell(row=r, column=c).value
-                # openpyxl round-trips empty-string writes as None; normalize back to "".
-                row[cols[c - 1]] = "" if v is None else v
-            rows.append(row)
-        rows.sort(key=lambda row: (row.get("Date") or date.min, row.get("EntryID") or ""), reverse=True)
-        return rows[:limit]
+    """A register's saved entries, newest first."""
+    return [dict(r) for r in _snapshot()["registers"][key][:limit]]
 
 
 def count_in_range(rows, start, end):
@@ -754,6 +831,96 @@ def build_patterns(all_rows_by_cat, weekly_flags, today):
     return (alerts + trends + observations)[:MAX_PATTERNS]
 
 
+def _bars(counts_in_order, label_key="label"):
+    """[(label, count), ...] -> rows with a 0-100 width for CSS bars."""
+    top = max((n for _, n in counts_in_order), default=0) or 1
+    return [{"label": label, "count": n, "pct": round(n / top * 100)} for label, n in counts_in_order]
+
+
+def more_dashboard_stats(all_rows_by_cat, today):
+    """Extra numbers for the dashboard: at-a-glance totals, the last 30 days,
+    weekday and class patterns, late-arrival times and the top students."""
+    rows = [(key, row, _row_date(row)) for key, rs in all_rows_by_cat.items() for row in rs]
+    dated = [(k, r, d) for k, r, d in rows if d]
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    last_month_end = month_start - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    last_month_cutoff = min(last_month_start + timedelta(days=today.day - 1), last_month_end)
+
+    def name_of(r):
+        return (r.get("Name") or "").strip()
+
+    month_rows = [(k, r) for k, r, d in dated if month_start <= d <= today]
+    students = get_master_students()
+    involved = {name_of(r).lower() for _, r in month_rows if name_of(r)}
+    this_m = len(month_rows)
+    last_m = sum(1 for _, _, d in dated if last_month_start <= d <= last_month_cutoff)
+    glance = {
+        "today": sum(1 for _, _, d in dated if d == today),
+        "week": sum(1 for _, _, d in dated if week_start <= d <= today),
+        "month": this_m,
+        "month_change": (None if not last_m else round((this_m - last_m) / last_m * 100)),
+        "students_month": len(involved),
+        "students_total": len(students),
+        "share_month": round(len(involved) / len(students) * 100) if students else 0,
+        "all_time": len(rows),
+    }
+
+    # Last 30 days, one bar per day.
+    days = [today - timedelta(days=i) for i in range(29, -1, -1)]
+    per_day = Counter(d for _, _, d in dated if days[0] <= d <= today)
+    daily = _bars([(d, per_day.get(d, 0)) for d in days])
+    for point in daily:
+        point["weekend"] = point["label"].weekday() >= 5
+        point["title"] = f"{point['label'].strftime('%a %d %b')}: {point['count']}"
+        point["label"] = point["label"].strftime("%d")
+
+    # Weekdays (school days first; Saturday/Sunday only if they have entries).
+    wd = Counter(d.weekday() for _, _, d in dated)
+    shown = [i for i in range(7) if i < 5 or wd.get(i)]
+    by_weekday = _bars([(WEEKDAY_NAMES[i][:3], wd.get(i, 0)) for i in shown])
+
+    # Classes, all time.
+    by_class_counts = Counter(_row_class_label(r) for _, r, _ in rows if _row_class_label(r))
+    order = lambda c: (0, int(re.match(r"\d+", c).group()), c) if re.match(r"\d+", c) else (1, 0, c)  # noqa: E731
+    by_class = _bars(sorted(by_class_counts.items(), key=lambda kv: order(kv[0])))
+
+    # Late arrivals: 15-minute slots.
+    times = [t for t in (_parse_clock_time(r.get("Time")) for r in all_rows_by_cat.get("LateComers", [])) if t]
+    slots = Counter((t.hour, t.minute // 15 * 15) for t in times)
+    late_slots = _bars([(datetime.combine(today, clock_time(h, m)).strftime("%I:%M").lstrip("0"), slots[(h, m)])
+                        for h, m in sorted(slots)])
+    median_time = _usual_time(times)
+
+    # Top students this year.
+    year_start = today.replace(month=1, day=1)
+    per_student = {}
+    for k, r, d in dated:
+        if d < year_start or not name_of(r):
+            continue
+        e = per_student.setdefault(name_of(r).lower(), {"name": name_of(r), "class": _row_class_label(r),
+                                                        "house": r.get("House") or "", "count": 0,
+                                                        "by": Counter(), "last": d})
+        e["count"] += 1
+        e["by"][k] += 1
+        e["last"] = max(e["last"], d)
+    top_students = sorted(per_student.values(), key=lambda e: (-e["count"], e["name"]))[:10]
+
+    sources = Counter((r.get("Source") or "Manual") for _, r, _ in rows)
+    return {
+        "glance": glance,
+        "daily": daily,
+        "by_weekday": by_weekday,
+        "by_class": by_class,
+        "late_slots": late_slots,
+        "late_median": median_time,
+        "late_timed": len(times),
+        "top_students": top_students,
+        "scanned_share": round(sources.get("OCR", 0) / len(rows) * 100) if rows else 0,
+    }
+
+
 def dashboard_data():
     today = date.today()
     month_start = today.replace(day=1)
@@ -789,7 +956,10 @@ def dashboard_data():
     weekly_flag_chart = weekly_flag_chart_series(weekly_flags, num_weeks=10)
     weekly_flag_chart_max = max((w["count"] for w in weekly_flag_chart), default=0) or 1
 
+    stats_more = more_dashboard_stats(all_rows_by_cat, today)
+
     stats = {
+        **stats_more,
         "max_month": max_month,
         "max_year_month": max_year_month,
         "house_breakdown": house_breakdown,
@@ -838,12 +1008,16 @@ def ocr_ready():
 
 
 def ocr_backend_label():
-    return "Gemini (cloud)" if USING_GEMINI else "Tesseract (offline)"
+    """Gemini is the main reader whenever a key is set; Tesseract only steps in
+    for a photo Gemini couldn't read (quota, outage, no internet)."""
+    if USING_GEMINI:
+        return "Gemini (cloud) · Tesseract backup" if OCR_AVAILABLE else "Gemini (cloud)"
+    return "Tesseract (offline)"
 
 
 def run_ocr_tesseract(image_path):
     if not OCR_AVAILABLE:
-        return "", "pytesseract is not installed on the server."
+        return "", "the Tesseract reading program isn't installed on the server PC (run Setup MCTM.cmd)"
     try:
         img = Image.open(image_path)
         img = ImageOps.exif_transpose(img)
@@ -991,13 +1165,6 @@ def is_header_like(tokens):
     return hits >= max(1, (len(cleaned) + 1) // 2)
 
 
-def match_name(name, names):
-    if not name:
-        return None
-    matches = difflib.get_close_matches(name, names, n=1, cutoff=0.45)
-    return matches[0] if matches else None
-
-
 def match_category_label(text):
     """Fuzzy-matches free text (a page title, or Gemini's category_guess)
     against the known category labels/keys. Returns a CATEGORIES key, or None."""
@@ -1051,8 +1218,95 @@ def parse_gemini_extraction(text):
             "house": str(row.get("house") or "").strip(),
             "name": str(row.get("name") or "").strip(),
             "klass": str(row.get("class") or "").strip(),
+            "date": str(row.get("date") or "").strip(),
         })
     return category_guess, result
+
+
+def gemini_page_date(text):
+    """The page_date Gemini read, as a date, or None."""
+    cleaned = re.sub(r"^```[a-zA-Z]*\n?|```\s*$", "", (text or "").strip()).strip()
+    try:
+        data = json.loads(cleaned)
+    except (ValueError, TypeError):
+        return None
+    return parse_register_date(data.get("page_date")) if isinstance(data, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# Dates written on register pages
+# ---------------------------------------------------------------------------
+
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
+_MONTH_RE = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+# Tried in order; each yields (day, month, year-or-None).
+_DATE_PATTERNS = [
+    # 2026-11-18
+    (re.compile(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b"), lambda m: (m[3], m[2], m[1])),
+    # 18/11/2026, 18-11-26, 18.11.2026 (day first: Indian registers)
+    (re.compile(r"\b(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{2,4})\b"), lambda m: (m[1], m[2], m[3])),
+    # 18 Nov 2026, 18th November, 18-Nov-26
+    (re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?[\s\-./,]*" + _MONTH_RE + r"(?:[\s\-./,]*(\d{2,4}))?\b", re.I),
+     lambda m: (m[1], m[2], m[3])),
+    # Nov 18, 2026
+    (re.compile(r"\b" + _MONTH_RE + r"\s*(\d{1,2})(?:st|nd|rd|th)?(?:[\s,]+(\d{4}))?\b", re.I),
+     lambda m: (m[2], m[1], m[3])),
+    # 18/11 (no year). Slash only: "8.45" is a late-arrival time, not 8 April.
+    (re.compile(r"\b(\d{1,2})\s*/\s*(\d{1,2})\b(?!\s*/\s*\d)"), lambda m: (m[1], m[2], None)),
+]
+
+
+def _build_date(day, month, year, today):
+    try:
+        day = int(day)
+        month = _MONTHS[month.lower()[:3]] if not str(month).isdigit() else int(month)
+    except (ValueError, KeyError):
+        return None
+    if year is None:
+        # No year written: this year, unless that's still ahead of us
+        # ("18/12" read in January means last December).
+        for y in (today.year, today.year - 1):
+            try:
+                d = date(y, month, day)
+            except ValueError:
+                continue
+            if d <= today:
+                return d
+        return None
+    year = int(year)
+    if year < 100:
+        year += 2000
+    try:
+        d = date(year, month, day)
+    except ValueError:
+        return None
+    if d > today or d.year < today.year - 2:
+        return None  # a future date, or one far back, is a misread
+    return d
+
+
+def find_register_dates(text, today=None):
+    """Every date found in a piece of OCR text, as (date, start, end) spans,
+    in reading order. Day-first; future dates are ignored as misreads."""
+    today = today or date.today()
+    found, taken = [], []
+    for pattern, parts in _DATE_PATTERNS:
+        for m in pattern.finditer(text or ""):
+            if any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            d = _build_date(*parts(m), today)
+            if d:
+                found.append((d, m.start(), m.end()))
+                taken.append((m.start(), m.end()))
+    return sorted(found, key=lambda f: f[1])
+
+
+def parse_register_date(text, today=None):
+    """The first readable date in `text` (e.g. '18/11/2026', '18th Nov',
+    '2026-11-18'), or None."""
+    found = find_register_dates(str(text or ""), today)
+    return found[0][0] if found else None
 
 
 def parse_structured_ocr_json(text):
@@ -1061,20 +1315,192 @@ def parse_structured_ocr_json(text):
     return rows
 
 
-def _make_candidate(raw_text, house, name, klass, students):
+def _make_candidate(raw_text, house, name, klass, students, row_date=None):
     """One review-table row. If the name matches a student in the master
     list, House/Class/ID come from that record -- what OCR read for those
-    columns is only kept for students it couldn't identify."""
-    best = match_name(name, [s["name"] for s in students])
-    student = find_student_by_name(best, students) if best else None
+    columns is only kept for students it couldn't identify. `row_date` is a
+    date read for this row (or None: the page's date applies)."""
+    student = match_student(name, klass, students)
     return {
         "raw_text": raw_text,
-        "guess_house": student["house"] if student else house,
-        "guess_name": best or name,
+        # The master list's house wins; if it has none, use what the page says.
+        "guess_house": (student["house"] if student and student["house"] else match_house(house, students)),
+        "guess_name": student["name"] if student else tidy_caps(name),
         "guess_class": class_label(student) if student else klass,
         "student_id": student["id"] if student else "",
-        "confident": bool(best),
+        "confident": bool(student),
+        "row_date": row_date,
     }
+
+
+MATCH_CUTOFF = 0.75        # letter-by-letter similarity a scanned name needs
+SOUND_ALIKE_CUTOFF = 0.90  # sound-alike similarity needed instead ("Achit" ~ Achyut)
+SOUND_ALIKE_CAP = 0.94     # an exact spelling (1.0) always beats a sound-alike
+MATCH_MARGIN = 0.05        # the best student must lead the next by this much, or it's a tie
+
+
+def _alnum(text):
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def tidy_caps(text):
+    """'GAUTHAM K' -> 'Gautham K' (registers are often written in block
+    capitals); text with any lower case is left as written."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    return text.title() if text and text.upper() == text and any(ch.isalpha() for ch in text) else text
+
+
+# Spelling variants of the same sound in Indian names, applied in order.
+_SOUND_RULES = [
+    (r"[^a-z ]", ""),
+    (r"([a-z])\1+", r"\1"),          # doubled letters: Aarav / Arav, Nikkesh / Nikesh
+    (r"au|aw|ow|ou", "o"),           # Gautham / Gowtham
+    (r"ee|ie", "i"),                 # Kabeer / Kabir
+    (r"oo", "u"),                    # Pooja / Puja
+    (r"([bcdgkpst])h", r"\1"),       # th/t dh/d sh/s ch/c kh/k gh/g bh/b ph/p
+    (r"w", "v"),                     # Vasudev / Wasudev
+    (r"y", "i"),                     # Achyut / Achiut, Riya / Ria
+    (r"z", "s"), (r"q", "k"), (r"x", "ks"),
+    (r"([a-z])\1+", r"\1"),
+]
+
+
+def sound_key(text):
+    """How a name sounds: 'Gowtham' and 'Gautham' both become 'gotam'."""
+    s = str(text or "").lower()
+    for pattern, repl in _SOUND_RULES:
+        s = re.sub(pattern, repl, s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _consonants(key):
+    """First letter of each word, then only its consonants: 'acit' -> 'act'."""
+    return " ".join(w[0] + re.sub(r"[aeiou]", "", w[1:]) for w in key.split())
+
+
+def sound_score(a, b):
+    """0..SOUND_ALIKE_CAP: how alike two names sound. Averages the sound keys'
+    similarity with their consonant outlines', so 'Achit' ~ 'Achyut' scores
+    0.94 but 'Arun' ~ 'Tarun' only 0.78. Names too short to judge by sound
+    count only when they sound exactly the same."""
+    ka, kb = sound_key(a), sound_key(b)
+    if not ka or not kb:
+        return 0.0
+    ca, cb = _consonants(ka), _consonants(kb)
+    if min(len(ca.replace(" ", "")), len(cb.replace(" ", ""))) < 3:
+        return SOUND_ALIKE_CAP if ka == kb else 0.0
+    score = (difflib.SequenceMatcher(None, ka, kb).ratio() + difflib.SequenceMatcher(None, ca, cb).ratio()) / 2
+    return min(score, SOUND_ALIKE_CAP)
+
+
+def name_score(scanned, known):
+    """(letter similarity, sound similarity) of a scanned name to a master-list
+    name, both ignoring capitals."""
+    a = re.sub(r"\s+", " ", str(scanned or "").strip().lower())
+    b = re.sub(r"\s+", " ", str(known or "").strip().lower())
+    return difflib.SequenceMatcher(None, a, b).ratio(), sound_score(a, b)
+
+
+def match_class(klass, section, students):
+    """(class, section) as the master list writes them, for what a page or a
+    scanner wrote: 'IB2' / '1B2' / 'IB-2-A' -> ('IB-2', ''), 'Grade 6' -> ('6', ''),
+    '9B' -> ('9', 'B') when 9 has a B section, else ('9', ''). Unknown classes
+    are kept as written."""
+    known = {}
+    for s in students:
+        c, sec = str(s.get("class") or "").strip(), str(s.get("section") or "").strip().upper()
+        if c:
+            known.setdefault(c.upper(), (c, set()))[1].add(sec)
+    text = re.sub(r"\s+", " ", f"{klass or ''} {section or ''}").strip().upper()
+    if not text:
+        return "", ""
+    text = re.sub(r"^(GRADE|CLASS|STD|STANDARD)[.]?[ ]*", "", text)  # "Grade 6" -> "6"
+    text = re.sub(r"^[1lI][B8](?=[-\s]?\d|$)", "IB", text)  # "1B2" is how a scanner reads "IB2"
+    m = re.fullmatch(r"(IB)\s*-?\s*(\d+)\s*-?\s*([A-Z])?", text) or re.fullmatch(r"()(\d+)\s*-?\s*([A-Z])?", text)
+    if not m:
+        return str(klass or "").strip(), str(section or "").strip()
+    cls = f"IB-{m.group(2)}" if m.group(1) else m.group(2)
+    sec = m.group(3) or ""
+    if cls.upper() not in known:
+        return cls, sec
+    real, sections = known[cls.upper()]
+    return real, (sec if sec in sections else "")
+
+
+def match_house(text, students):
+    """The master-list house a scanned house means ('VINDYAS' -> Vindhyas,
+    'Aravali' -> Aravallis), else the text as written (capitals tidied)."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not _alnum(text):
+        return ""
+    houses = sorted({s["house"] for s in students if s.get("house")})
+    best, best_score = None, 0.0
+    for h in houses:
+        letters, sound = name_score(text, h)
+        score = max(letters if letters >= 0.8 else 0, sound if sound >= SOUND_ALIKE_CUTOFF else 0)
+        if score > best_score:
+            best, best_score = h, score
+    return best or tidy_caps(text)
+
+
+def match_student(name, klass, students):
+    """The master-list student a scanned name means, or None when unsure.
+    Capitals never matter. In order of strength: the exact spelling; a small
+    misread ("Arun Alagapan" -> Arun Alagappan); a different spelling of the
+    same sound, at 90%+ ("Achit" -> Achyut, "Gautham" -> Gowtham). Loose
+    resemblance never counts. When several students fit equally (two
+    "Samyuktha"s), the class written on the page decides; if it can't,
+    nobody is picked, so a person checks the row instead of it being filed
+    under the wrong student."""
+    n = re.sub(r"\s+", " ", str(name or "").strip().lower())
+    if len(_alnum(n)) < 2:
+        return None
+
+    def by_class(candidates):
+        if len(candidates) > 1 and _alnum(klass):
+            k = _alnum(klass)
+            same = [s for s in candidates if k in (_alnum(s["class"]) + _alnum(s["section"]), _alnum(s["class"]))]
+            if same:
+                return same
+        return candidates
+
+    # 1. The exact spelling (ignoring capitals and spaces) settles it, even
+    #    when a classmate's name is one letter away (Siddarth / Siddharth).
+    key = _alnum(n)
+    exact = [s for s in students
+             if key in (_alnum(s["name"]), _alnum(re.sub(r"\s*\([^)]*\)\s*$", "", s["name"])))]
+    if exact:
+        exact = by_class(exact)
+        return exact[0] if len(exact) == 1 else None
+
+    # 2. Misreads and other spellings of the same sound.
+    # One wrong letter in a short first name is a different child ("Arun" is
+    # not "Tarun"), so short names must match almost exactly.
+    cutoff = 0.92 if len(_alnum(n)) <= 6 else MATCH_CUTOFF
+    scored = []
+    for s in students:
+        full = s["name"].strip().lower()
+        base = re.sub(r"\s*\([^)]*\)\s*$", "", full)  # "samyuktha (9)" -> "samyuktha"
+        r = 0.0
+        for known in {full, base}:
+            letters, sound = name_score(n, known)
+            if letters >= cutoff:
+                r = max(r, letters)
+            if sound >= SOUND_ALIKE_CUTOFF:
+                r = max(r, sound)
+        if r:
+            scored.append((r, s))
+    if not scored:
+        return None
+    best = max(r for r, _ in scored)
+    # A house name in the name column ("Kailash") is a misread column, not a
+    # student who merely looks like it (Akileash). Exact names never get here.
+    for h in {s["house"] for s in students if s.get("house")}:
+        letters, sound = name_score(n, h)
+        if letters >= 0.8 or sound >= SOUND_ALIKE_CUTOFF:
+            return None
+    top = by_class([s for r, s in scored if r >= best - MATCH_MARGIN])
+    return top[0] if len(top) == 1 else None
 
 
 def build_candidates_from_structured(rows, students):
@@ -1083,8 +1509,9 @@ def build_candidates_from_structured(rows, students):
         name = row["name"]
         if not name or name.strip().lower() in HEADER_WORDS:
             continue  # no name to work with, or the model slipped in a header row anyway
-        raw_text = " / ".join(v for v in (row["house"], name, row["klass"]) if v)
-        candidates.append(_make_candidate(raw_text, row["house"], name, row["klass"], students))
+        raw_text = " / ".join(v for v in (row["house"], name, row["klass"], row.get("date", "")) if v)
+        candidates.append(_make_candidate(raw_text, row["house"], name, row["klass"], students,
+                                          parse_register_date(row.get("date"))))
     return candidates
 
 
@@ -1105,20 +1532,105 @@ def parse_ocr_lines(raw_text, students):
     lines = [ln for ln in lines if len(ln) >= 2]
 
     candidates = []
+    heading_date = None  # a date written on its own line applies to the rows below it
     for ln in lines:
-        parts = split_columns(ln)
-        if is_header_like(parts if len(parts) > 1 else ln.split()):
+        dates = find_register_dates(ln)
+        body = ln
+        for _, start, end in reversed(dates):
+            body = body[:start] + "  " + body[end:]
+        body = re.sub(r"(?i)\b(date|dated|on)\b\s*[:\-]?", " ", body).strip(" -:,/\t")
+        if dates and len(body) < 2:
+            heading_date = dates[0][0]  # a "Date: 18/11/2026" line, not a student
+            continue
+        if dates and match_category_label(body):
+            heading_date = dates[0][0]  # "UNIFORM REGISTER 18/11/2026"
+            continue
+
+        parts = split_columns(body)
+        if is_header_like(parts if len(parts) > 1 else body.split()):
             continue  # this line is the column-title row, not a student
 
-        if len(parts) >= 3:
+        found = None if len(parts) >= 3 else split_around_known_name(body, students)
+        if found:
+            house, name, klass = found  # Tesseract squeezed the column gaps to single spaces
+        elif len(parts) >= 3:
             house, name, klass = parts[0], parts[1], parts[2]
         elif len(parts) == 2:
             house, name, klass = "", parts[0], parts[1]
         else:
-            house, name, klass = "", ln, ""
+            house, name, klass = "", body, ""
 
-        candidates.append(_make_candidate(ln, house, name, klass, students))
+        row_date = dates[0][0] if dates else heading_date
+        candidates.append(_make_candidate(ln, house, name, klass, students, row_date))
     return candidates
+
+
+def page_date_from_text(raw_text):
+    """The date written near the top of a plain-text (Tesseract) page: the
+    first date in its first eight lines, or None."""
+    head = "\n".join([ln for ln in (raw_text or "").splitlines() if ln.strip()][:8])
+    return parse_register_date(head)
+
+
+def split_around_known_name(line, students):
+    """For a line whose columns ran together ("Kailash ArunAlagappan IB-1A"):
+    finds the run of words that is a master-list student's name, and returns
+    (house, name, class) as the words before it, the name, and the words
+    after it. Exact matches (ignoring spaces, so "ArunAlagappan" counts) win;
+    otherwise a close match via match_student. None if no name is found."""
+    tokens = [t for t in line.split() if _alnum(t)]  # drop OCR specks like "|" or "�"
+    if not tokens:
+        return None
+    exact = {}  # spelling without spaces -> every student it could mean
+    for s in students:
+        full = _alnum(s["name"])
+        base = _alnum(re.sub(r"\s*\([^)]*\)\s*$", "", s["name"]))
+        exact.setdefault(full, []).append(s)
+        if base != full:
+            exact.setdefault(base, []).append(s)
+    # A house ("Kailash") or class ("IB-1A") is never a name, however much it
+    # looks like one (Kailash ~ Akileash).
+    houses = {_alnum(s["house"]) for s in students if s.get("house")}
+
+    def not_a_name(span):
+        key = _alnum(span)
+        if any(ch.isdigit() for ch in key) or key in houses:
+            return True
+        return any(difflib.SequenceMatcher(None, key, h).ratio() >= 0.8 for h in houses)
+
+    best = None  # (score, length, start, end, name)
+    for start in range(len(tokens)):
+        for end in range(start + 1, min(start + 4, len(tokens)) + 1):
+            span = " ".join(tokens[start:end])
+            key = _alnum(span)
+            if len(key) < 3:
+                continue
+            if key in exact:
+                matches = {s["id"]: s for s in exact[key]}
+                # One student: use their real name ("Samyuktha 9" -> "Samyuktha (9)").
+                # Several (a bare "Samyuktha"): keep the text; the class decides later.
+                name = next(iter(matches.values()))["name"] if len(matches) == 1 else span
+                score = 2
+            elif not any(not_a_name(t) for t in tokens[start:end]) and match_student(span, "", students):
+                name, score = span, 1
+            else:
+                continue
+            cand = (score, end - start, start, end, name)
+            if best is None or cand[:2] > best[:2]:
+                best = cand
+    if best is None:
+        return None
+    _, _, start, end, name = best
+    return " ".join(tokens[:start]), name, " ".join(tokens[end:])
+
+
+def _title_text(line):
+    """A page-title line without its date or filler words: 'LATE COMERS.
+    Date: 17/11/2026' -> 'LATE COMERS'."""
+    for _, start, end in reversed(find_register_dates(line)):
+        line = line[:start] + " " + line[end:]
+    line = re.sub(r"(?i)\b(date|dated|register|book|list|record|records)\b", " ", line)
+    return re.sub(r"[^\w&]+", " ", line).strip()
 
 
 def guess_category_from_text_lines(raw_text):
@@ -1127,7 +1639,7 @@ def guess_category_from_text_lines(raw_text):
     matching one of the known categories (e.g. "UNIFORM REGISTER")."""
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()][:5]
     for ln in lines:
-        key = match_category_label(ln)
+        key = match_category_label(ln) or match_category_label(_title_text(ln))
         if key:
             return key
     return None
@@ -1148,6 +1660,284 @@ def extract_candidates(raw_text, students, backend):
         # Gemini didn't follow the JSON format for some reason -- fall back
         # to treating its output as plain text rather than losing the scan.
     return parse_ocr_lines(raw_text, students), guess_category_from_text_lines(raw_text)
+
+
+def extract_page_date(raw_text, backend):
+    """The date written for the whole page, or None if none could be read."""
+    if not raw_text:
+        return None
+    if backend == "gemini" and parse_structured_ocr_json(raw_text) is not None:
+        return gemini_page_date(raw_text)
+    # Tesseract text, or Gemini text that wasn't JSON: look near the top.
+    return page_date_from_text(raw_text)
+
+
+# ---------------------------------------------------------------------------
+# Scanning several photos at once
+# ---------------------------------------------------------------------------
+
+MAX_SCAN_PHOTOS = 10
+SCAN_WORKERS = 3  # photos read at the same time (keeps a free Gemini key inside its rate limit)
+ALLOWED_PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".gif"}
+
+
+def safe_upload_name(original, index):
+    """A filename that can't escape the scans folder, keeps the extension,
+    and won't collide with another photo uploaded in the same second."""
+    base, ext = os.path.splitext(os.path.basename(original or ""))
+    ext = ext.lower() if ext.lower() in ALLOWED_PHOTO_EXT else ".jpg"
+    base = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_")[:40] or "photo"
+    return f"scan_{datetime.now():%Y%m%d_%H%M%S}_{index + 1:02d}_{base}{ext}"
+
+
+def read_one_scan(path, students, hint_key, today):
+    """OCR + parse one saved photo into a review group."""
+    raw_text, error, warning, backend = run_ocr(path)
+    candidates, category_guess = extract_candidates(raw_text, students, backend)
+    page_date = extract_page_date(raw_text, backend)
+    if page_date is None:
+        row_dates = Counter(c["row_date"] for c in candidates if c["row_date"])
+        page_date = row_dates.most_common(1)[0][0] if row_dates else None
+    return {
+        "candidates": candidates,
+        "detected_key": category_guess or hint_key,
+        "category_was_detected": bool(category_guess),
+        "page_date": page_date or today,
+        "date_was_detected": page_date is not None,
+        "raw_text": raw_text,
+        "error": error,
+        "warning": warning,
+    }
+
+
+def read_scans(saved, hint_key, on_progress=None):
+    """Reads every saved photo (a few at a time) and returns one group per
+    photo, in upload order. `on_progress()` is called after each photo."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    students = get_master_students()
+    today = date.today()
+
+    def one(item):
+        try:
+            result = read_one_scan(item[1], students, hint_key, today)
+        except Exception as exc:  # one bad photo must not sink a 100-photo batch
+            result = {"candidates": [], "detected_key": hint_key, "category_was_detected": False,
+                      "page_date": today, "date_was_detected": False, "raw_text": "",
+                      "error": f"couldn't read this photo ({exc})", "warning": None}
+        if on_progress:
+            on_progress()
+        return result
+
+    with ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(saved)) or 1) as pool:
+        results = list(pool.map(one, saved))
+    groups = []
+    for (original, path), result in zip(saved, results):
+        result["filename"] = os.path.basename(path)
+        result["original_name"] = original
+        groups.append(result)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Scan folder: drop up to 100 photos in one folder, scan them all at once
+# ---------------------------------------------------------------------------
+
+MAX_FOLDER_PHOTOS = 100
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+DEFAULT_SCAN_FOLDER = os.path.join(DATA_DIR, "scan-folder")
+SCANNED_SUBFOLDER = "Scanned"  # photos move here once their rows are saved
+SCAN_JOB_TTL = 12 * 3600       # seconds a finished batch is kept for review
+
+SCAN_JOBS = {}
+scan_jobs_lock = threading.Lock()
+SCAN_JOBS_DIR = os.path.join(DATA_DIR, "scan-jobs")  # finished batches, so a restart doesn't lose a review
+
+
+def _job_file(job_id):
+    return os.path.join(SCAN_JOBS_DIR, f"{job_id}.json") if re.fullmatch(r"[A-Za-z0-9_-]{6,40}", job_id or "") else None
+
+
+def _to_json(value):
+    if isinstance(value, (date, datetime)):
+        return {"__date__": value.isoformat()[:10]}
+    if isinstance(value, dict):
+        return {k: _to_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json(v) for v in value]
+    return value
+
+
+def _from_json(value):
+    if isinstance(value, dict):
+        if set(value) == {"__date__"}:
+            return date.fromisoformat(value["__date__"])
+        return {k: _from_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_from_json(v) for v in value]
+    return value
+
+
+def _save_job(job):
+    path = _job_file(job["id"])
+    if not path:
+        return
+    os.makedirs(SCAN_JOBS_DIR, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_to_json(job), f)
+    os.replace(tmp, path)
+
+
+def _load_job(job_id):
+    path = _job_file(job_id)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return _from_json(json.load(f))
+    except (OSError, ValueError):
+        return None
+
+
+def _delete_job_file(job_id):
+    path = _job_file(job_id)
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(changes):
+    data = load_settings()
+    data.update(changes)
+    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def scan_folder_path():
+    """The folder to scan: the one chosen on the Scan page, else data/scan-folder
+    (created on first use)."""
+    folder = load_settings().get("scan_folder") or DEFAULT_SCAN_FOLDER
+    if os.path.abspath(folder) == os.path.abspath(DEFAULT_SCAN_FOLDER):
+        os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def list_folder_photos(folder):
+    """Photos directly in `folder` (not in subfolders such as Scanned), oldest first."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    photos = [os.path.join(folder, n) for n in names
+              if os.path.splitext(n)[1].lower() in ALLOWED_PHOTO_EXT and os.path.isfile(os.path.join(folder, n))]
+    return sorted(photos, key=lambda p: (os.path.getmtime(p), os.path.basename(p).lower()))
+
+
+def _forget_old_jobs():
+    now = time.time()
+    with scan_jobs_lock:
+        for job_id in [j for j, job in SCAN_JOBS.items()
+                       if job["status"] != "running" and now - job["created"] > SCAN_JOB_TTL]:
+            del SCAN_JOBS[job_id]
+    try:
+        for name in os.listdir(SCAN_JOBS_DIR):
+            path = os.path.join(SCAN_JOBS_DIR, name)
+            if now - os.path.getmtime(path) > SCAN_JOB_TTL:
+                os.remove(path)
+    except OSError:
+        pass
+
+
+def running_folder_job():
+    with scan_jobs_lock:
+        return next((job for job in SCAN_JOBS.values() if job["status"] == "running"), None)
+
+
+def start_folder_job(folder, hint_key):
+    """Copies up to MAX_FOLDER_PHOTOS photos from `folder` into the scans
+    store and reads them in a background thread. Returns the job."""
+    _forget_old_jobs()
+    sources = list_folder_photos(folder)[:MAX_FOLDER_PHOTOS]
+    job = {
+        "id": base64.urlsafe_b64encode(os.urandom(9)).decode(),
+        "status": "running", "total": len(sources), "done": 0, "groups": None, "error": None,
+        "hint": hint_key, "folder": folder, "sources": sources, "created": time.time(),
+    }
+    with scan_jobs_lock:
+        SCAN_JOBS[job["id"]] = job
+
+    def work():
+        try:
+            saved = []
+            for i, src in enumerate(sources):
+                dest = os.path.join(UPLOAD_DIR, safe_upload_name(os.path.basename(src), i))
+                shutil.copy2(src, dest)
+                saved.append((os.path.basename(src), dest))
+
+            def tick():
+                with scan_jobs_lock:
+                    job["done"] += 1
+
+            groups = read_scans(saved, hint_key, on_progress=tick)
+            with scan_jobs_lock:
+                job["groups"] = groups
+                job["status"] = "done"
+            _save_job(job)
+        except Exception as exc:
+            with scan_jobs_lock:
+                job["error"] = str(exc)
+                job["status"] = "error"
+
+    threading.Thread(target=work, daemon=True, name=f"scan-folder-{job['id']}").start()
+    return job
+
+
+def get_job(job_id):
+    """A scan batch: from memory, or from disk after a server restart."""
+    with scan_jobs_lock:
+        job = SCAN_JOBS.get(job_id)
+    if job is None:
+        job = _load_job(job_id)
+        if job is not None:
+            with scan_jobs_lock:
+                SCAN_JOBS[job_id] = job
+    return job
+
+
+def move_to_scanned(paths, folder):
+    """Moves photos whose rows were saved into <folder>/Scanned, so the next
+    folder scan doesn't read them again. Returns how many were moved."""
+    dest_dir = os.path.join(folder, SCANNED_SUBFOLDER)
+    moved = 0
+    for src in paths:
+        if not os.path.isfile(src):
+            continue
+        os.makedirs(dest_dir, exist_ok=True)
+        base, ext = os.path.splitext(os.path.basename(src))
+        dest = os.path.join(dest_dir, base + ext)
+        n = 2
+        while os.path.exists(dest):
+            dest = os.path.join(dest_dir, f"{base} ({n}){ext}")
+            n += 1
+        try:
+            shutil.move(src, dest)
+            moved += 1
+        except OSError:
+            pass  # open in another program: it simply gets offered again next time
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -1351,32 +2141,30 @@ def scan():
     # photo's own title can't be confidently detected -- detection always
     # wins when it succeeds, since it reflects the actual photo.
     if request.method == "POST":
-        file = request.files.get("photo")
-        if not file or file.filename == "":
-            flash("Please choose a photo of the register page.", "error")
-            return redirect(url_for("scan"))
-
         hint_key = request.form.get("hint")
         hint_key = hint_key if hint_key in CATEGORIES else None
+        files = [f for f in request.files.getlist("photo") if f and f.filename]
+        if not files:
+            flash("Please choose at least one photo of a register page.", "error")
+            return redirect(url_for("scan", hint=hint_key or ""))
+        if len(files) > MAX_SCAN_PHOTOS:
+            flash(f"You chose {len(files)} photos; only the first {MAX_SCAN_PHOTOS} were read. "
+                  "Scan the rest in another batch.", "error")
+            files = files[:MAX_SCAN_PHOTOS]
 
-        filename = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-        save_path = os.path.join(UPLOAD_DIR, filename)
-        file.save(save_path)
+        saved = []
+        for i, f in enumerate(files):
+            path = os.path.join(UPLOAD_DIR, safe_upload_name(f.filename, i))
+            f.save(path)
+            saved.append((f.filename, path))
 
-        raw_text, error, warning, backend = run_ocr(save_path)
-        students = get_master_students()
-        candidates, category_guess = extract_candidates(raw_text, students, backend)
-        detected_key = category_guess or hint_key
-
+        groups = read_scans(saved, hint_key)
         return render_template(
             "scan_review.html",
             categories=CATEGORIES,
-            detected_key=detected_key,
-            category_was_detected=bool(category_guess),
-            candidates=candidates,
-            raw_text=raw_text,
-            error=error,
-            warning=warning,
+            groups=groups,
+            hint_key=hint_key,
+            total_rows=sum(len(g["candidates"]) for g in groups),
             ocr_available=ocr_ready(),
             ocr_backend=ocr_backend_label(),
             today=date.today(),
@@ -1384,58 +2172,217 @@ def scan():
 
     hint_key = request.args.get("hint")
     hint_key = hint_key if hint_key in CATEGORIES else ""
+    folder = scan_folder_path()
     return render_template(
-        "scan.html", categories=CATEGORIES, hint_key=hint_key,
+        "scan.html", categories=CATEGORIES, hint_key=hint_key, max_photos=MAX_SCAN_PHOTOS,
         ocr_available=ocr_ready(), ocr_backend=ocr_backend_label(),
+        folder=folder, folder_exists=os.path.isdir(folder), folder_count=len(list_folder_photos(folder)),
+        folder_is_default=os.path.abspath(folder) == os.path.abspath(DEFAULT_SCAN_FOLDER),
+        max_folder=MAX_FOLDER_PHOTOS, on_server_pc=_request_is_from_server_pc(), using_gemini=USING_GEMINI,
+        running_job=running_folder_job(),
     )
+
+
+@app.route("/scan/photo/<filename>")
+def scan_photo(filename):
+    """A saved register photo, shown beside its rows on the review page."""
+    if not re.fullmatch(r"scan_[A-Za-z0-9_-]+\.[A-Za-z0-9]{2,5}", filename):
+        return "Not found", 404
+    from flask import send_from_directory
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
+@app.route("/scan/folder/start", methods=["POST"])
+def scan_folder_start():
+    hint_key = request.form.get("hint")
+    hint_key = hint_key if hint_key in CATEGORIES else None
+    running = running_folder_job()
+    if running:
+        return redirect(url_for("scan_job", job_id=running["id"]))
+    folder = scan_folder_path()
+    photos = list_folder_photos(folder)
+    if not photos:
+        flash(f"There are no photos in {folder}. Put the register photos there, then scan.", "error")
+        return redirect(url_for("scan", hint=hint_key or ""))
+    if len(photos) > MAX_FOLDER_PHOTOS:
+        flash(f"The folder has {len(photos)} photos; the oldest {MAX_FOLDER_PHOTOS} are being read now. "
+              "Scan the folder again afterwards for the rest.", "error")
+    job = start_folder_job(folder, hint_key)
+    return redirect(url_for("scan_job", job_id=job["id"]))
+
+
+@app.route("/scan/job/<job_id>")
+def scan_job(job_id):
+    job = get_job(job_id)
+    if job is None:
+        flash("That batch is no longer available (the server was restarted, or it was already saved). "
+              "Scan the folder again.", "error")
+        return redirect(url_for("scan"))
+    if job["status"] == "running":
+        return render_template("scan_job.html", categories=CATEGORIES, job=job)
+    if job["status"] == "error":
+        flash(f"The folder scan stopped: {job['error']}", "error")
+        return redirect(url_for("scan"))
+    groups = job["groups"]
+    return render_template(
+        "scan_review.html", categories=CATEGORIES, groups=groups, hint_key=job["hint"], job=job,
+        total_rows=sum(len(g["candidates"]) for g in groups),
+        ocr_available=ocr_ready(), ocr_backend=ocr_backend_label(), today=date.today(),
+    )
+
+
+@app.route("/scan/job/<job_id>/status")
+def scan_job_status(job_id):
+    job = get_job(job_id)
+    if job is None:
+        return jsonify({"status": "gone"}), 404
+    return jsonify({"status": job["status"], "done": job["done"], "total": job["total"]})
+
+
+@app.route("/scan/folder/settings", methods=["POST"])
+def scan_folder_settings():
+    hint = request.form.get("hint") or ""
+    raw = (request.form.get("folder") or "").strip().strip('"')
+    if request.form.get("reset") or not raw:
+        save_settings({"scan_folder": ""})
+        flash(f"Scanning the default folder again: {scan_folder_path()}", "success")
+        return redirect(url_for("scan", hint=hint))
+    folder = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isdir(folder):
+        flash(f"There's no folder at {folder} on the server PC. Create it first, or check the path.", "error")
+        return redirect(url_for("scan", hint=hint))
+    save_settings({"scan_folder": folder})
+    flash(f"Photos will be scanned from {folder}.", "success")
+    return redirect(url_for("scan", hint=hint))
+
+
+@app.route("/scan/gemini-key", methods=["POST"])
+def scan_gemini_key():
+    """Opens SETUP_GEMINI_KEY.bat on the server PC. The key is typed into that
+    window, never into the web page, so it never crosses the network."""
+    hint = request.form.get("hint") or ""
+    script = os.path.join(BASE_DIR, "SETUP_GEMINI_KEY.bat")
+    if _request_is_from_server_pc() and hasattr(os, "startfile") and os.path.exists(script):
+        try:
+            _open_file_on_server(script)
+            flash("Paste the key into the window that opened. The tracker restarts by itself when it's saved.", "success")
+        except OSError as exc:
+            flash(f"Couldn't open the key setup: {exc}", "error")
+    else:
+        flash("Add the Gemini key on the server PC: run SETUP_GEMINI_KEY.bat there.", "error")
+    return redirect(url_for("scan", hint=hint))
+
+
+@app.route("/scan/folder/open", methods=["POST"])
+def scan_folder_open():
+    """Opens the scan folder in File Explorer -- only on the server PC itself."""
+    hint = request.form.get("hint") or ""
+    folder = scan_folder_path()
+    if _request_is_from_server_pc() and hasattr(os, "startfile"):
+        try:
+            _open_file_on_server(folder)
+        except OSError as exc:
+            flash(f"Couldn't open the folder: {exc}", "error")
+    else:
+        flash(f"The scan folder is on the server PC: {folder}", "error")
+    return redirect(url_for("scan", hint=hint))
 
 
 @app.route("/scan/commit", methods=["POST"])
 def scan_commit():
-    key = request.form.get("category")
-    if key not in CATEGORIES:
-        flash("Please choose which register this scan belongs to before saving.", "error")
-        return redirect(url_for("scan"))
+    """Saves the ticked rows of one or more scanned photos. Each photo
+    ("group" g) has its own register (group_category_<g>) and page date
+    (group_date_<g>); a row may carry its own date (row_date), which wins.
+    A form without groups (the old single-photo shape) uses "category" and
+    "date" for everything. Every row is checked before anything is written:
+    one bad register or date means nothing is saved."""
+    form = request.form
+    names = form.getlist("row_name")
+    student_ids = form.getlist("row_student_id")
+    houses = form.getlist("row_house")
+    classes = form.getlist("row_class")
+    remarks_list = form.getlist("row_remarks")
+    row_dates = form.getlist("row_date")
+    row_groups = form.getlist("row_group")
+    logged_by = form.get("logged_by", "").strip()
+    job = get_job(form.get("job_id", ""))  # set when the rows came from a folder scan
+    try:
+        included = {int(i) for i in form.getlist("row_include")}  # indices of the ticked rows
+    except ValueError:
+        included = set()
 
-    entry_date, date_error = parse_entry_date(request.form.get("date"))
-    if date_error:
-        flash(f"{date_error} Nothing was saved -- please scan the page again.", "error")
-        return redirect(url_for("scan", hint=key))
+    def at(values, i):
+        return values[i].strip() if i < len(values) and values[i] else ""
 
-    names = request.form.getlist("row_name")
-    student_ids = request.form.getlist("row_student_id")
-    houses = request.form.getlist("row_house")
-    classes = request.form.getlist("row_class")
-    includes = request.form.getlist("row_include")  # values are the row indices that were checked
-    remarks_list = request.form.getlist("row_remarks")
-    logged_by = request.form.get("logged_by", "").strip()
-
-    saved = 0
-    included = set(int(i) for i in includes)
+    planned, problems = [], []
     for i, name in enumerate(names):
         if i not in included:
             continue
         name = name.strip()
-        student_id = student_ids[i].strip() if i < len(student_ids) else ""
+        student_id = at(student_ids, i)
         if not name and not student_id:
             continue
-        values = {
-            "Date": entry_date,
-            "Name": name,
-            "StudentID": student_id,
-            "House": houses[i].strip() if i < len(houses) else "",
-            "Class": classes[i].strip() if i < len(classes) else "",
-            "Remarks": remarks_list[i] if i < len(remarks_list) else "",
-        }
-        append_log_entry(key, values, logged_by, "OCR")
-        saved += 1
+        g = at(row_groups, i) or "0"
+        key = form.get(f"group_category_{g}") or form.get("category")
+        if key not in CATEGORIES:
+            problems.append(f"photo {int(g) + 1 if g.isdigit() else g}: choose which register it is")
+            continue
+        raw_date = at(row_dates, i) or form.get(f"group_date_{g}") or form.get("date")
+        entry_date, date_error = parse_entry_date(raw_date)
+        if date_error:
+            problems.append(f"{name or student_id}: {date_error.rstrip('.').lower()}")
+            continue
+        planned.append((key, {
+            "Date": entry_date, "Name": name, "StudentID": student_id,
+            "House": at(houses, i), "Class": at(classes, i), "Remarks": at(remarks_list, i),
+        }, g))
 
-    flash(
-        f"Saved {saved} entr{'y' if saved == 1 else 'ies'} from the scan into "
-        f"{CATEGORIES[key]['label']}, dated {entry_date.strftime('%d %b %Y')}.",
-        "success",
-    )
-    return redirect(url_for("entry", key=key))
+    if problems:
+        unique = list(dict.fromkeys(problems))
+        if job:
+            # A folder batch is kept on the server: go back to it, not to a rescan.
+            flash("Nothing was saved. Fix these, then save again: " + "; ".join(unique[:6])
+                  + (f" (and {len(unique) - 6} more)" if len(unique) > 6 else "") + ".", "error")
+            return redirect(url_for("scan_job", job_id=job["id"]))
+        flash("Nothing was saved. Fix these and scan again: " + "; ".join(unique[:6])
+              + (f" (and {len(unique) - 6} more)" if len(unique) > 6 else "") + ".", "error")
+        first_key = form.get("group_category_0") or form.get("category")
+        return redirect(url_for("scan", hint=first_key if first_key in CATEGORIES else ""))
+
+    if not planned:
+        flash("No rows were ticked, so nothing was saved.", "error")
+        return redirect(url_for("scan_job", job_id=job["id"]) if job else url_for("scan"))
+
+    per_register = Counter()
+    dates = set()
+    # One write for the whole batch (raises WorkbookLocked -> nothing saved).
+    append_log_entries([(key, values) for key, values, _ in planned], logged_by, "OCR")
+    for key, values, _ in planned:
+        per_register[key] += 1
+        dates.add(values["Date"])
+
+    where = ", ".join(f"{n} in {CATEGORIES[k]['label']}" for k, n in per_register.items())
+    when = (min(dates).strftime("%d %b %Y") if len(dates) == 1
+            else f"{min(dates).strftime('%d %b')} to {max(dates).strftime('%d %b %Y')}")
+    total = len(planned)
+    message = f"Saved {total} entr{'y' if total == 1 else 'ies'} from the scan: {where}, dated {when}."
+
+    if job:
+        # Photos that produced saved rows move to <folder>/Scanned; unreadable
+        # or untouched ones stay in the folder for the next scan.
+        used = {int(g) for _, _, g in planned if str(g).isdigit()}
+        done_paths = [p for i, p in enumerate(job["sources"]) if i in used]
+        moved = move_to_scanned(done_paths, job["folder"])
+        left = len(list_folder_photos(job["folder"]))
+        message += f" {moved} photo{'' if moved == 1 else 's'} moved to the {SCANNED_SUBFOLDER} folder"
+        message += f"; {left} still waiting in the scan folder." if left else "."
+        with scan_jobs_lock:
+            SCAN_JOBS.pop(job["id"], None)
+        _delete_job_file(job["id"])
+
+    flash(message, "success")
+    top = per_register.most_common(1)[0][0]
+    return redirect(url_for("entry", key=top))
 
 
 @app.route("/students", methods=["GET", "POST"])

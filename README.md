@@ -14,18 +14,31 @@ web page, no installation needed on the other ~60 machines.
 
 ---
 
-## 0. Quickest way: install it as an app (server PC)
+## 0. Quickest way: one-time setup (server PC)
 
-1. Install Python 3.9+ from https://www.python.org/downloads/ (tick **Add python.exe to PATH**).
-2. Double-click **`Install MCTM.bat`**. It installs the packages, creates the database if
-   there isn't one (existing data is never touched), and adds:
-   - a **MCTM Tracker** icon on the Desktop,
-   - a Start menu folder with *MCTM Tracker*, *Stop MCTM server* and *Uninstall MCTM Tracker*,
-   - an entry in **Settings > Apps > Installed apps**.
-   No admin rights needed.
-3. From then on, just click **MCTM Tracker**. It starts the server quietly in the background
-   (no black window) and opens the tracker in its own app window. Clicking it again while
-   it's running just opens another window.
+Double-click **`Setup MCTM.cmd`** once. Or just open **`MCTM.pyw`**: the first time it runs
+on a PC it starts the setup by itself and waits for it. Setup:
+
+1. installs **Python 3.12** with winget if no Python 3.9+ is found (per user, no admin);
+2. installs the **Python packages** from `requirements.txt`;
+3. installs the **Tesseract** reading program with winget (Windows may ask you to allow it);
+4. offers to add a free **Gemini key** (better on handwriting; press Enter to skip);
+5. creates the **database** if there isn't one (existing data is never touched), draws the
+   icon, and adds a **MCTM Tracker** Desktop icon, a Start menu folder (*MCTM Tracker*,
+   *Stop MCTM server*, *Uninstall MCTM Tracker*) and an entry in **Settings > Apps**.
+
+It's safe to run again: anything already installed is skipped. To see what it would do
+without installing anything:
+```bash
+powershell -ExecutionPolicy Bypass -File installer\setup.ps1 -Check
+```
+When it finishes it writes `data/setup-done.json`. Delete that file to make the app run setup
+again on its next launch. If winget isn't available (older Windows), setup says so and links
+the manual downloads.
+
+From then on, just click **MCTM Tracker**. It starts the server quietly in the background
+(no black window) and opens the tracker in its own app window. Clicking it again while
+it's running just opens another window.
 
 Closing the window does **not** stop the server, so the other PCs keep working. To stop
 it, use **Start menu > MCTM Tracker > Stop MCTM server**. Server output goes to
@@ -67,12 +80,15 @@ tier. It's **not the default** because it needs internet access on the server PC
 the scanned photo to Google's servers — worth deciding deliberately since register photos
 contain real students' names, not something to turn on silently.
 
-If you want it:
+If you want it (recommended: Gemini becomes the **main reader**, Tesseract only the backup):
 1. Get a free key at https://aistudio.google.com/apikey (no credit card needed).
-2. Copy `.env.example` to `.env` (same folder) and paste your key into `GEMINI_API_KEY=`.
-3. Restart `app.py`. It automatically uses Gemini whenever a key is present, and falls back
-   to Tesseract when `.env` is blank or missing — the "Scan register" page shows which
-   engine is active.
+2. Double-click **`SETUP_GEMINI_KEY.bat`** (or click **Add Gemini key** on the Scan page,
+   on the server PC). Paste the key; it's checked with Google, saved in `.env`, and the
+   tracker restarts by itself. The Scan page then says "Reading with Gemini (cloud) ·
+   Tesseract backup".
+3. Each photo goes to Gemini first. Only if Gemini can't read it (quota used up, outage,
+   no internet) does that photo fall back to Tesseract, and the review page says so.
+   `SETUP_GEMINI_KEY.bat -Remove` goes back to Tesseract only.
 
 `.env` is gitignored — your key never gets committed or pushed to GitHub.
 
@@ -158,14 +174,21 @@ startup, or ask me to set that up.
 2. **Manual entry** — pick a category (e.g. Late Comers) → "Log entry" → start typing a
    name → pick the matching student from the dropdown (this is what prevents duplicate or
    misspelled name records) → fill in the category-specific field + remarks → Save.
-3. **Scan register** — same category → "Scan register" → upload a photo of the paper
-   register page. The review screen shows one row per detected student with three boxes:
-   **House**, **Name** (with the same autocomplete as manual entry), and **Class**. The
-   register's own header row (the line that just says "House / Name / Class") is
-   automatically filtered out and never shown as a fake entry. Picking a name from the
-   autocomplete overwrites House/Class with that student's real master-list record; fix
-   anything else, uncheck junk lines, then Save. Nothing is written to the database until
-   you click Save on the review screen.
+3. **Scan register** — "Scan register" → choose **up to 10 photos** of register pages at
+   once (3 are read at a time; with Gemini a batch of 10 takes about a minute). Each photo
+   gets its own section on the review screen with a thumbnail, its own **register** (read
+   from the page title, else the register you came from) and its own **date**:
+   - a date written on the page (heading or "Date:" line) becomes the page date;
+   - a date beside a row, or a date heading partway down the page, becomes that row's date;
+   - day-first, as written in India (05/11 is 5 November); future dates are ignored as misreads;
+   - no date found → today, which you can change.
+   Rows show **House**, **Name** (same autocomplete as manual entry), **Class** and **Date**
+   (only when it differs from the page's). Names are matched to the master list strictly:
+   small misreads are fixed, but a name that only loosely resembles someone is left
+   unticked as "Not in master list", and two students with the same name are told apart by
+   the class written on the page. Fix anything, untick junk lines, then Save. Nothing is
+   written until you Save, and if any ticked page has no register or a row has a bad date,
+   nothing is saved at all.
 4. **Dashboard** (`/`) — live KPI cards (today/this week/this month/all-time) per category,
 5. **Find students** (`/find`) — type a name or student ID, then narrow by register, period,
    class, section, house, or "N or more times" to find repeat late comers. Results are one row
@@ -198,7 +221,7 @@ migrate_add_house.py            one-time script that added the House column to a
 requirements.txt                Python packages needed
 run_server.bat                  double-click to start the server
 MCTM.pyw                        one-click launcher (starts the server hidden, opens the app window)
-Install MCTM.bat                installs shortcuts + Settings > Apps entry (runs installer/install.ps1)
+Setup MCTM.cmd                  one-time setup: Python, packages, Tesseract, Gemini key, shortcuts (installer/setup.ps1)
 Uninstall MCTM.bat              removes it again, backing up data first (installer/uninstall.ps1)
 installer/                      install/uninstall scripts, stop_server.pyw, make_icon.py
 .env.example                    template for optional Gemini API key (copy to .env)

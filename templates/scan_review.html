@@ -1,123 +1,132 @@
 {% extends "base.html" %}
 {% block title %}Review scan{% endblock %}
 {% block content %}
+{% set many = groups|length > 1 %}
 <header class="page-head" data-enter>
   <div>
     <p class="eyebrow"><a class="text-link" href="{{ url_for('scan') }}">Scan</a> / Review</p>
-    <h1>Review the scanned page</h1>
-    <p class="subtitle">Confirm the register, fix any wrong names, untick lines that aren't real entries, then save.</p>
+    <h1>{{ 'Review ' ~ groups|length ~ ' scanned pages' if many else 'Review the scanned page' }}</h1>
   </div>
 </header>
 
-{% if error %}
-<div class="error-box">OCR could not run: {{ error }}</div>
-{% endif %}
-{% if warning %}
-<div class="notice-box">{{ warning }}</div>
-{% endif %}
-
-{% if not candidates %}
+{% if total_rows == 0 %}
+{# Nothing readable on any photo: say why, and offer a retry that keeps the register. #}
+{% for g in groups %}
+  {% if g.error %}<div class="error-box">{% if many %}Photo {{ loop.index }}: {% endif %}OCR could not run: {{ g.error }}</div>{% endif %}
+{% endfor %}
 <section class="panel">
   <div class="empty-state">
-    <strong>No text was detected in that photo</strong>
-    <p>Try a clearer, well-lit photo{% if detected_key %} of the {{ categories[detected_key].label }} page{% endif %}, or log the entries by hand.</p>
+    <strong>No text was detected in {{ 'those photos' if many else 'that photo' }}</strong>
   </div>
-  {# Retry right here, keeping the register the user came from. #}
   <form method="post" action="{{ url_for('scan') }}" enctype="multipart/form-data" class="retry-form" id="retry-form">
-    <input type="hidden" name="hint" value="{{ detected_key or '' }}">
+    <input type="hidden" name="hint" value="{{ hint_key or '' }}">
     <div class="field">
-      <label for="retry-photo">Another photo of the register page</label>
-      <input type="file" id="retry-photo" name="photo" accept="image/*" capture="environment" required>
+      <label for="retry-photo">Photos of the register pages (up to 10)</label>
+      <input type="file" id="retry-photo" name="photo" accept="image/*" multiple required>
     </div>
     <div class="form-actions">
       <button class="btn btn-primary" type="submit" id="retry-submit">Scan again</button>
-      {% if detected_key %}
-      <a class="btn btn-outline" href="{{ url_for('entry', key=detected_key) }}">Log {{ categories[detected_key].label }} by hand</a>
+      {% if hint_key %}
+      <a class="btn btn-outline" href="{{ url_for('entry', key=hint_key) }}">Log {{ categories[hint_key].label }} by hand</a>
       {% endif %}
     </div>
   </form>
 </section>
+
 {% else %}
 <form method="post" action="{{ url_for('scan_commit') }}" id="review-form">
-  <section class="panel">
-    <h2>Which register is this?</h2>
-    {% if detected_key and category_was_detected %}
-    <p class="panel-sub">Detected from the page title. Pick another if that's wrong.</p>
-    {% elif detected_key %}
-    <p class="panel-sub">No title found on the page, so this defaults to the register you came from. Pick another if that's wrong.</p>
-    {% else %}
-    <p class="panel-sub" style="color:var(--warn-ink)">We couldn't tell which register this is. Pick one.</p>
-    {% endif %}
-    <div class="category-picker" id="category-picker" role="radiogroup" aria-label="Register">
-      {% for key, cfg in categories.items() %}
-      <button type="button" class="category-pill {{ 'selected' if key == detected_key else '' }}" data-key="{{ key }}" role="radio" aria-checked="{{ 'true' if key == detected_key else 'false' }}" style="--cat-color: {{ cfg.color }}">{{ cfg.label }}</button>
-      {% endfor %}
+  {% if job %}<input type="hidden" name="job_id" value="{{ job.id }}">{% endif %}
+  <section class="panel review-summary">
+    <div class="field">
+      <label for="scan-logged-by">Logged by (staff name)</label>
+      <input type="text" id="scan-logged-by" name="logged_by" placeholder="e.g. Mrs. Rao">
     </div>
-    <input type="hidden" name="category" id="category-input" value="{{ detected_key or '' }}">
-    <p class="inline-error" id="category-error" hidden>Choose which register this page belongs to before saving.</p>
-
-    <div class="form-grid" style="margin-top:22px">
-      <div class="field">
-        <label for="scan-date">Date on the register</label>
-        <input type="date" id="scan-date" name="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
-      </div>
-      <div class="field">
-        <label for="scan-logged-by">Logged by (staff name)</label>
-        <input type="text" id="scan-logged-by" name="logged_by" placeholder="e.g. Mrs. Rao">
-      </div>
-    </div>
+    {% if job %}<p class="small-note">Photos with saved rows move to the folder's "Scanned" folder.</p>{% endif %}
   </section>
 
-  <section class="panel">
-    <div class="panel-head">
-      <div>
-        <h2>Rows read from the page <span class="mono" style="color:var(--muted);font-size:15px">{{ candidates|length }}</span></h2>
-        <p class="panel-sub">Names found in the master list take their house and class from it. Type a name or student ID to fix a row.</p>
+  {% set ns = namespace(row=0) %}
+  {% for g in groups %}
+  {% set gi = loop.index0 %}
+  <section class="panel scan-group" data-group="{{ gi }}">
+    <div class="scan-group-head">
+      <a class="scan-thumb" href="{{ url_for('scan_photo', filename=g.filename) }}" target="_blank" rel="noopener" title="Open the full photo">
+        <img src="{{ url_for('scan_photo', filename=g.filename) }}" alt="Photo {{ loop.index }}: {{ g.original_name }}" loading="lazy">
+      </a>
+      <div class="scan-group-title">
+        <h2>{{ 'Photo ' ~ loop.index if many else 'Scanned page' }} <span class="mono" style="color:var(--muted);font-size:13px">{{ g.original_name }}</span></h2>
+        {% if g.error %}<div class="error-box">OCR could not run: {{ g.error }}</div>{% endif %}
+        {% if g.warning %}<div class="notice-box">{{ g.warning }}</div>{% endif %}
       </div>
     </div>
+
+    {% if not g.candidates %}
+    <div class="empty-state"><strong>Nothing could be read from this photo.</strong></div>
+    {% else %}
+    <div class="group-settings">
+      <div class="field">
+        <label>Register{% if g.category_was_detected %} <span class="found-tag">read from the page</span>{% endif %}</label>
+        <div class="category-picker" role="radiogroup" aria-label="Register for photo {{ loop.index }}">
+          {% for key, cfg in categories.items() %}
+          <button type="button" class="category-pill {{ 'selected' if key == g.detected_key else '' }}" data-key="{{ key }}" role="radio" aria-checked="{{ 'true' if key == g.detected_key else 'false' }}" style="--cat-color: {{ cfg.color }}">{{ cfg.label }}</button>
+          {% endfor %}
+        </div>
+        <input type="hidden" class="group-category" name="group_category_{{ gi }}" value="{{ g.detected_key or '' }}">
+        <p class="inline-error category-error" hidden>Choose which register this page belongs to.</p>
+      </div>
+      <div class="field group-date">
+        <label for="group-date-{{ gi }}">Date{% if g.date_was_detected %} <span class="found-tag">read from the page</span>{% endif %}</label>
+        <input type="date" id="group-date-{{ gi }}" name="group_date_{{ gi }}" class="group-date-input" value="{{ g.page_date.isoformat() }}" max="{{ today.isoformat() }}" required>
+        {% if not g.date_was_detected %}<p class="small-note">No date on the page: set to today.</p>{% endif %}
+      </div>
+    </div>
+
     <div class="table-scroll" style="max-height:none;overflow:visible">
     <table class="review-table">
       <thead>
-        <tr>
-          <th>Use</th>
-          <th>House</th>
-          <th>Student name</th>
-          <th>Class</th>
-          <th>Remarks</th>
-        </tr>
+        <tr><th>Use</th><th>House</th><th>Student name</th><th>Class</th><th>Date <span class="th-note">if not the page's</span></th><th>Remarks</th></tr>
       </thead>
       <tbody>
-        {% for c in candidates %}
+        {% for c in g.candidates %}
+        {% set i = ns.row %}
         <tr class="{{ '' if c.confident else 'is-off' }}">
           <td class="check-cell">
-            <input type="checkbox" name="row_include" value="{{ loop.index0 }}" aria-label="Save row {{ loop.index }}" {{ 'checked' if c.confident else '' }}>
+            <input type="checkbox" name="row_include" value="{{ i }}" aria-label="Save row {{ loop.index }} of photo {{ gi + 1 }}" {{ 'checked' if c.confident else '' }}>
+            <input type="hidden" name="row_group" value="{{ gi }}">
           </td>
-          <td><input type="text" class="row-house-input" name="row_house" value="{{ c.guess_house }}" placeholder="House" aria-label="House, row {{ loop.index }}"></td>
+          <td><input type="text" class="row-house-input" name="row_house" value="{{ c.guess_house }}" placeholder="House" aria-label="House"></td>
           <td class="autocomplete-wrap">
-            <input type="text" class="row-name-input" name="row_name" value="{{ c.guess_name }}" autocomplete="off" aria-label="Student name, row {{ loop.index }}">
+            <input type="text" class="row-name-input" name="row_name" value="{{ c.guess_name }}" autocomplete="off" aria-label="Student name">
             <input type="hidden" class="row-id-input" name="row_student_id" value="{{ c.student_id }}">
             <div class="autocomplete-list row-name-list" role="listbox"></div>
             <span class="row-id-note {{ '' if c.student_id else 'is-missing' }}">{{ c.student_id or 'Not in master list' }}</span>
             <span class="raw-text" title="What the scanner read">{{ c.raw_text }}</span>
           </td>
-          <td><input type="text" class="row-class-input" name="row_class" value="{{ c.guess_class }}" placeholder="Class" aria-label="Class, row {{ loop.index }}"></td>
-          <td><input type="text" name="row_remarks" placeholder="Remarks" aria-label="Remarks, row {{ loop.index }}"></td>
+          <td><input type="text" class="row-class-input" name="row_class" value="{{ c.guess_class }}" placeholder="Class" aria-label="Class"></td>
+          <td><input type="date" class="row-date-input" name="row_date" value="{{ c.row_date.isoformat() if c.row_date and c.row_date != g.page_date else '' }}" max="{{ today.isoformat() }}" aria-label="Date for this row, if different from the page"></td>
+          <td><input type="text" name="row_remarks" placeholder="Remarks" aria-label="Remarks"></td>
         </tr>
+        {% set ns.row = ns.row + 1 %}
         {% endfor %}
       </tbody>
     </table>
     </div>
-    <div class="form-actions" style="margin-top:20px">
-      <button class="btn btn-primary" type="submit">Save ticked entries</button>
-      <a class="btn btn-outline" href="{{ url_for('scan') }}">Discard and rescan</a>
-    </div>
-  </section>
-</form>
+    {% endif %}
 
-<details class="panel">
-  <summary>Raw text from the scanner</summary>
-  <pre class="raw-text raw-dump">{{ raw_text }}</pre>
-</details>
+    {% if g.raw_text %}
+    <details class="raw-details">
+      <summary>Raw text from the scanner</summary>
+      <pre class="raw-text raw-dump">{{ g.raw_text }}</pre>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <div class="save-bar">
+    <span class="small-note" id="save-count"></span>
+    <a class="btn btn-outline" href="{{ url_for('scan', hint=hint_key or '') }}">{{ 'Back to Scan' if job else 'Discard and rescan' }}</a>
+    <button class="btn btn-primary" type="submit" id="save-btn">Save ticked entries</button>
+  </div>
+</form>
 {% endif %}
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>
@@ -127,7 +136,7 @@
     const list = row.querySelector('.row-name-list');
     const include = row.querySelector('input[name="row_include"]');
     if (include) {
-      include.addEventListener('change', function () { row.classList.toggle('is-off', !include.checked); });
+      include.addEventListener('change', function () { row.classList.toggle('is-off', !include.checked); updateCount(); });
     }
     if (!input || !list) return;
     const idInput = row.querySelector('.row-id-input');
@@ -143,7 +152,7 @@
         idInput.value = s.id;
         idNote.textContent = s.id;
         idNote.classList.remove('is-missing');
-        if (include) { include.checked = true; row.classList.remove('is-off'); }
+        if (include) { include.checked = true; row.classList.remove('is-off'); updateCount(); }
       },
       onNoMatch: function () {
         idInput.value = '';
@@ -153,10 +162,11 @@
     });
   });
 
-  const picker = document.getElementById('category-picker');
-  const categoryInput = document.getElementById('category-input');
-  const categoryError = document.getElementById('category-error');
-  if (picker) {
+  document.querySelectorAll('.scan-group').forEach(function (group) {
+    const picker = group.querySelector('.category-picker');
+    if (!picker) return;
+    const input = group.querySelector('.group-category');
+    const err = group.querySelector('.category-error');
     picker.querySelectorAll('.category-pill').forEach(function (pill) {
       pill.addEventListener('click', function () {
         picker.querySelectorAll('.category-pill').forEach(function (p) {
@@ -165,9 +175,38 @@
         });
         pill.classList.add('selected');
         pill.setAttribute('aria-checked', 'true');
-        categoryInput.value = pill.dataset.key;
-        categoryError.hidden = true;
+        input.value = pill.dataset.key;
+        err.hidden = true;
       });
+    });
+  });
+
+  function updateCount() {
+    const el = document.getElementById('save-count');
+    if (!el) return;
+    const n = document.querySelectorAll('input[name="row_include"]:checked').length;
+    el.textContent = n + ' row' + (n === 1 ? '' : 's') + ' ticked';
+    document.getElementById('save-btn').textContent = n ? 'Save ' + n + ' entr' + (n === 1 ? 'y' : 'ies') : 'Save ticked entries';
+  }
+  updateCount();
+
+  const reviewForm = document.getElementById('review-form');
+  if (reviewForm) {
+    reviewForm.addEventListener('submit', function (e) {
+      // Every photo with ticked rows needs a register before anything is sent.
+      let first = null;
+      document.querySelectorAll('.scan-group').forEach(function (group) {
+        const input = group.querySelector('.group-category');
+        if (!input) return;
+        const ticked = group.querySelectorAll('input[name="row_include"]:checked').length;
+        const missing = ticked > 0 && !input.value;
+        group.querySelector('.category-error').hidden = !missing;
+        if (missing && !first) first = group;
+      });
+      if (first) {
+        e.preventDefault();
+        first.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     });
   }
 
@@ -176,18 +215,7 @@
     retryForm.addEventListener('submit', function () {
       const btn = document.getElementById('retry-submit');
       btn.disabled = true;
-      btn.textContent = 'Reading the page...';
-    });
-  }
-
-  const reviewForm = document.getElementById('review-form');
-  if (reviewForm) {
-    reviewForm.addEventListener('submit', function (e) {
-      if (!categoryInput.value) {
-        e.preventDefault();
-        categoryError.hidden = false;
-        picker.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+      btn.textContent = 'Reading...';
     });
   }
 </script>

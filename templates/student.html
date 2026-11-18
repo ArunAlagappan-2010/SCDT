@@ -41,7 +41,6 @@
     <div class="panel-head">
       <div>
         <h2>History <span class="mono" style="color:var(--muted);font-size:15px">{{ s.total }}</span></h2>
-        <p class="panel-sub">{% if s.first_date %}Every entry from {{ s.first_date.strftime('%d %b %Y') }} to {{ s.last_date.strftime('%d %b %Y') }}, newest first.{% else %}Every entry, newest first.{% endif %}</p>
       </div>
       {% if s.entries %}
       <input type="search" id="history-filter" class="filter-input no-print" placeholder="Filter history" aria-label="Filter history">
@@ -69,14 +68,12 @@
     {% else %}
     <div class="empty-state">
       <strong>A clean record</strong>
-      <p>{{ s.name }} hasn't been logged in any register.</p>
     </div>
     {% endif %}
   </section>
 
   <section class="panel">
     <h2>What stands out</h2>
-    <p class="panel-sub">From every entry on record.</p>
     {% if s.notes %}
     <ul class="pattern-list">
       {% for n in s.notes %}
@@ -84,7 +81,7 @@
       {% endfor %}
     </ul>
     {% else %}
-    <div class="empty-state"><p>Nothing yet. Patterns show up after a few entries.</p></div>
+    <div class="empty-state"><strong>Nothing yet</strong></div>
     {% endif %}
     <div class="profile-links no-print">
       <a class="btn btn-primary btn-sm" href="{{ url_for('entry', key='LateComers') }}">Log a new entry</a>

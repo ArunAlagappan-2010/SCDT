@@ -5,7 +5,6 @@
   <div>
     <p class="eyebrow">Data</p>
     <h1>Master student list</h1>
-    <p class="subtitle">The one name list every form, scan and Excel dropdown checks against. Keep it current and every register stays in step.</p>
   </div>
   <div class="head-actions">
     <a class="btn btn-outline" href="{{ url_for('open_excel') }}" title="Opens in Excel on the server PC; downloads a copy anywhere else. Close Excel before saving changes here.">Open Excel file</a>
@@ -14,7 +13,6 @@
 
 <section class="panel">
   <h2>Add a student</h2>
-  <p class="panel-sub">IDs are given automatically, in order.</p>
   <form method="post" class="form-grid five">
     <input type="hidden" name="action" value="add">
     <div class="field"><label for="new-name">Full name</label><input type="text" id="new-name" name="name" required></div>
@@ -30,7 +28,6 @@
   <div class="panel-head">
     <div>
       <h2>All students <span class="mono" style="color:var(--muted);font-size:15px">{{ students|length }}</span></h2>
-      <p class="panel-sub">Edit any cell, then save once at the bottom.</p>
     </div>
     <input type="search" id="student-filter" class="filter-input" placeholder="Filter by name, ID, class" aria-label="Filter students">
   </div>
@@ -60,7 +57,6 @@
   {% else %}
   <div class="empty-state">
     <strong>No students yet</strong>
-    <p>Add the first student above. Every register's name search uses this list.</p>
   </div>
   {% endif %}
 </section>

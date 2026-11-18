@@ -5,7 +5,7 @@
   <div>
     <p class="eyebrow"><a class="text-link" href="{{ url_for('entry', key=key) }}">{{ cfg.label }}</a> / {{ entry_id }}</p>
     <h1>Edit {{ entry_id }}</h1>
-    <p class="subtitle">Logged {{ 'by scan' if row.Source == 'OCR' else 'manually' }}{{ ' by ' ~ row.LoggedBy if row.LoggedBy else '' }}. Change anything below and save.</p>
+    <p class="subtitle">{{ 'Scanned' if row.Source == 'OCR' else 'Logged by hand' }}{{ ' · ' ~ row.LoggedBy if row.LoggedBy else '' }}</p>
   </div>
 </header>
 
@@ -24,7 +24,7 @@
         data-confirm="Delete {{ entry_id }} for {{ row.Name }}? This cannot be undone." class="danger-zone">
     <div>
       <h2>Delete this entry</h2>
-      <p>Removes it from the Excel file and from every dashboard count. This can't be undone.</p>
+      <p>This can't be undone.</p>
     </div>
     <button type="submit" class="btn btn-danger">Delete {{ entry_id }}</button>
   </form>

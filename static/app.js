@@ -109,21 +109,19 @@ function attachStudentForm() {
     classInput.value = s.class || "";
     sectionInput.value = s.section || "";
     houseInput.value = s.house || "";
-    status.textContent = "Found " + s.name + " (" + s.id + ") in the master list. Details filled in.";
-    setState("is-found");
+    warn("");  // the filled-in fields say it all
   }
 
-  function setState(cls) {
-    status.classList.remove("is-found", "is-missing");
-    if (cls) status.classList.add(cls);
+  // The status line only ever shows a problem: a name or ID that isn't in the master list.
+  function warn(message) {
+    status.textContent = message;
+    status.hidden = !message;
+    status.classList.toggle("is-missing", !!message);
   }
 
   function notFound(typed) {
     idInput.value = "";
-    setState(typed ? "is-missing" : "");
-    status.textContent = typed
-      ? "“" + typed + "” isn't in the master list. Fill in class, section and house yourself, or add the student first."
-      : "";
+    warn(typed ? "“" + typed + "” isn't in the master list. Add the student first, or fill in class, section and house." : "");
   }
 
   attachAutocomplete(nameInput, document.getElementById("name-list"), { onSelect: fill, onNoMatch: notFound });
@@ -133,14 +131,9 @@ function attachStudentForm() {
     if (!typed) return;
     lookupStudent(typed, function (s) {
       if (s) fill(s);
-      else { status.textContent = "No student with ID “" + typed + "” in the master list."; setState("is-missing"); }
+      else warn("No student with ID “" + typed + "” in the master list.");
     });
   });
-
-  if (idInput.value.trim()) {
-    status.textContent = "Linked to " + idInput.value.trim() + " in the master list.";
-    setState("is-found");
-  }
 }
 
 // Client-side filter for a table: hides rows whose text doesn't contain the query.

@@ -1,4 +1,4 @@
-<#
+﻿<#
   Installs MCTM Tracker for the current Windows user. No admin rights needed.
 
   What it does:
@@ -10,7 +10,7 @@
        MCTM Tracker / Stop MCTM server / Uninstall MCTM Tracker
     6. lists the app in Settings > Apps > Installed apps, so it can be uninstalled there
 
-  Run it with "Install MCTM.bat". Flags (mainly for testing):
+  Normally run by setup.ps1 ("Setup MCTM.cmd"). Flags (mainly for testing):
     -ShortcutRoot <dir>   put the Desktop and Start menu shortcuts under this folder instead
     -NoRegistry           don't add the Installed apps entry
     -SkipPackages         don't run pip
@@ -80,7 +80,7 @@ foreach ($p in $candidates) {
 }
 if (-not $Python -and $candidates.Count -gt 0) { $Python = $candidates[0] }
 if (-not $Python) {
-    Fail "Python 3.9 or newer was not found. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run Install MCTM.bat again."
+    Fail "Python 3.9 or newer was not found. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run Setup MCTM.cmd again."
 }
 $PythonW = Join-Path (Split-Path $Python) "pythonw.exe"
 if (-not (Test-Path $PythonW)) { $PythonW = $Python }
