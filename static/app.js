@@ -110,10 +110,17 @@ function attachStudentForm() {
     sectionInput.value = s.section || "";
     houseInput.value = s.house || "";
     status.textContent = "Found " + s.name + " (" + s.id + ") in the master list. Details filled in.";
+    setState("is-found");
+  }
+
+  function setState(cls) {
+    status.classList.remove("is-found", "is-missing");
+    if (cls) status.classList.add(cls);
   }
 
   function notFound(typed) {
     idInput.value = "";
+    setState(typed ? "is-missing" : "");
     status.textContent = typed
       ? "“" + typed + "” isn't in the master list. Fill in class, section and house yourself, or add the student first."
       : "";
@@ -126,12 +133,13 @@ function attachStudentForm() {
     if (!typed) return;
     lookupStudent(typed, function (s) {
       if (s) fill(s);
-      else status.textContent = "No student with ID “" + typed + "” in the master list.";
+      else { status.textContent = "No student with ID “" + typed + "” in the master list."; setState("is-missing"); }
     });
   });
 
   if (idInput.value.trim()) {
     status.textContent = "Linked to " + idInput.value.trim() + " in the master list.";
+    setState("is-found");
   }
 }
 
@@ -142,7 +150,8 @@ function attachTableFilter(input, table, emptyNote) {
     const q = input.value.trim().toLowerCase();
     let shown = 0;
     table.querySelectorAll("tbody tr").forEach(function (tr) {
-      const match = !q || tr.textContent.toLowerCase().indexOf(q) !== -1;
+      const text = (tr.dataset.search || tr.textContent).toLowerCase();
+      const match = !q || text.indexOf(q) !== -1;
       tr.hidden = !match;
       if (match) shown++;
     });

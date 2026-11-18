@@ -1,59 +1,69 @@
 {% extends "base.html" %}
 {% block title %}{{ cfg.label }} - Log entry{% endblock %}
 {% block content %}
-<h1>{{ cfg.label }}</h1>
-<p class="subtitle">Log a new case manually, or switch to Scan register to pull entries from a photo.</p>
+<header class="page-head" data-enter>
+  <div>
+    <p class="eyebrow">Register</p>
+    <h1>{{ cfg.label }}</h1>
+    <p class="subtitle">Log a case by hand, or scan a photo of the paper register page.</p>
+  </div>
+  <nav class="tabs" aria-label="Entry method">
+    <a class="active" aria-current="page" href="{{ url_for('entry', key=key) }}">Manual entry</a>
+    <a href="{{ url_for('scan', hint=key) }}">Scan register</a>
+  </nav>
+</header>
 
-<div class="tabs">
-  <a class="active" href="{{ url_for('entry', key=key) }}">Manual entry</a>
-  <a href="{{ url_for('scan', hint=key) }}">Scan register</a>
-</div>
-
-<div class="panel">
+<section class="panel">
   <h2>New entry</h2>
+  <p class="panel-sub">Type a name or student ID. Class, section and house fill in from the master list.</p>
   <form method="post" class="form-grid three">
     {% include "_entry_fields.html" %}
-    <div class="field span-all">
-      <button class="btn btn-cat" style="background: {{ cfg.color }}" type="submit">Save entry</button>
+    <div class="field span-all form-actions">
+      <button class="btn btn-primary" type="submit">Save entry</button>
+      <span class="small-note" style="margin:0">Not in the list? <a class="text-link" href="{{ url_for('students') }}">Add the student first</a>.</span>
     </div>
   </form>
-  <p class="small-note">Not in the list yet? Add the student on the <a href="{{ url_for('students') }}">master student list</a> page first.</p>
-</div>
+</section>
 
-<div class="panel">
-  <h2>
-    <span>All {{ cfg.label }} entries ({{ rows|length }}{{ '+' if rows|length >= max_shown else '' }})</span>
-    <input type="search" id="entry-filter" class="filter-input" placeholder="Filter by name, ID, date...">
-  </h2>
+<section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>All {{ cfg.label }} entries <span class="mono" style="color:var(--muted);font-size:15px">{{ rows|length }}{{ '+' if rows|length >= max_shown else '' }}</span></h2>
+      <p class="panel-sub">Newest first. Edit or delete any row.</p>
+    </div>
+    <input type="search" id="entry-filter" class="filter-input" placeholder="Filter by name, ID, date" aria-label="Filter entries">
+  </div>
   {% if rows %}
   <div class="table-scroll">
     <table id="entries-table">
       <thead>
         <tr>
-          <th></th><th>Date</th><th>Name</th><th>Class</th><th>House</th>
+          <th>Date</th><th>Name</th><th>Class</th><th>House</th>
           {% for f,_ in cfg.extra_fields %}<th>{{ f }}</th>{% endfor %}
-          <th>Remarks</th><th>By</th><th>Source</th><th>Entry</th>
+          <th>Remarks</th><th>By</th><th>Source</th><th>Entry</th><th><span class="sr-only">Actions</span></th>
         </tr>
       </thead>
       <tbody>
         {% for row in rows %}
         <tr>
-          <td class="row-actions">
-            <a class="btn btn-sm btn-outline" href="{{ url_for('edit_entry', key=key, entry_id=row.EntryID) }}">Edit</a>
-            <form method="post" action="{{ url_for('delete_entry', key=key, entry_id=row.EntryID) }}"
-                  data-confirm="Delete {{ row.EntryID }} for {{ row.Name }}? This cannot be undone.">
-              <button type="submit" class="btn btn-sm btn-danger">Delete</button>
-            </form>
-          </td>
-          <td class="nowrap">{{ row.Date.strftime('%d %b %Y') if row.Date and row.Date.strftime else row.Date }}</td>
-          <td class="nowrap">{{ row.Name }}</td>
+          <td class="nowrap mono" style="font-size:13px">{{ row.Date.strftime('%d %b %Y') if row.Date and row.Date.strftime else row.Date }}</td>
+          <td class="name-cell"><a class="student-link" href="{{ student_url(row.Name) }}">{{ row.Name }}</a></td>
           <td class="nowrap">{{ row.Class }}{{ '-' ~ row.Section if row.Section else '' }}</td>
           <td>{{ row.House }}</td>
           {% for f,_ in cfg.extra_fields %}<td>{{ row[f] }}</td>{% endfor %}
           <td>{{ row.Remarks }}</td>
           <td>{{ row.LoggedBy }}</td>
-          <td>{{ row.Source }}</td>
+          <td><span class="tag {{ 'tag-ocr' if row.Source == 'OCR' else '' }}">{{ 'Scan' if row.Source == 'OCR' else row.Source }}</span></td>
           <td class="muted-cell">{{ row.EntryID }}</td>
+          <td class="row-actions">
+            <div class="row-actions-inner">
+              <a class="btn btn-sm btn-outline" href="{{ url_for('edit_entry', key=key, entry_id=row.EntryID) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_entry', key=key, entry_id=row.EntryID) }}"
+                    data-confirm="Delete {{ row.EntryID }} for {{ row.Name }}? This cannot be undone.">
+                <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+              </form>
+            </div>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -61,9 +71,13 @@
   </div>
   <p class="small-note" id="filter-empty" hidden>No entries match that filter.</p>
   {% else %}
-  <p class="small-note">Nothing logged yet.</p>
+  <div class="empty-state">
+    <strong>Nothing logged yet</strong>
+    <p>Entries saved above, or from a scanned register page, appear here.</p>
+    <a class="btn btn-outline btn-sm" href="{{ url_for('scan', hint=key) }}">Scan a register page</a>
+  </div>
   {% endif %}
-</div>
+</section>
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script>

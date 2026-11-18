@@ -1,41 +1,43 @@
 {# Shared fields for the new-entry and edit-entry forms. Expects `form`, `cfg`, `today`. #}
-<div class="field">
-  <label for="date-input">Date of entry</label>
-  <input type="date" id="date-input" name="date" value="{{ form.get('date', '') }}" max="{{ today.isoformat() }}" required>
-</div>
+<div class="form-section-label">Student</div>
 <div class="field autocomplete-wrap">
   <label for="name-input">Student name</label>
   <input type="text" id="name-input" name="name" value="{{ form.get('name', '') }}" autocomplete="off" placeholder="Type a name or student ID">
-  <div class="autocomplete-list" id="name-list"></div>
+  <div class="autocomplete-list" id="name-list" role="listbox"></div>
 </div>
 <div class="field">
   <label for="student-id-input">Student ID</label>
   <input type="text" id="student-id-input" name="student_id" value="{{ form.get('student_id', '') }}" autocomplete="off" placeholder="e.g. STU003">
 </div>
 <div class="field">
+  <label for="date-input">Date of entry</label>
+  <input type="date" id="date-input" name="date" value="{{ form.get('date', '') }}" max="{{ today.isoformat() }}" required>
+</div>
+<div class="field">
   <label for="class-input">Class</label>
-  <input type="text" id="class-input" name="klass" value="{{ form.get('klass', '') }}" placeholder="Filled in automatically">
+  <input type="text" id="class-input" name="klass" class="is-auto" value="{{ form.get('klass', '') }}" placeholder="Filled in automatically">
 </div>
 <div class="field">
   <label for="section-input">Section</label>
-  <input type="text" id="section-input" name="section" value="{{ form.get('section', '') }}" placeholder="Filled in automatically">
+  <input type="text" id="section-input" name="section" class="is-auto" value="{{ form.get('section', '') }}" placeholder="Filled in automatically">
 </div>
 <div class="field">
   <label for="house-input">House</label>
-  <input type="text" id="house-input" name="house" value="{{ form.get('house', '') }}" placeholder="Filled in automatically">
+  <input type="text" id="house-input" name="house" class="is-auto" value="{{ form.get('house', '') }}" placeholder="Filled in automatically">
 </div>
-<p class="small-note span-all" id="student-status">Pick a name or type a student ID &mdash; class, section and house fill in from the master list.</p>
-<div class="field">
-  <label>Logged by (staff name)</label>
-  <input type="text" name="logged_by" value="{{ form.get('logged_by', '') }}" placeholder="e.g. Mrs. Rao">
-</div>
+<p class="status-line" id="student-status" aria-live="polite">Pick a name or type a student ID. Class, section and house fill in from the master list.</p>
+<div class="form-section-label">Details</div>
 {% for field, itype in cfg.extra_fields %}
 <div class="field">
-  <label>{{ field }}</label>
-  <input type="text" name="{{ field }}" value="{{ form.get(field, '') }}" placeholder="{{ field }}">
+  <label for="extra-{{ loop.index }}">{{ field }}</label>
+  <input type="text" id="extra-{{ loop.index }}" name="{{ field }}" value="{{ form.get(field, '') }}" placeholder="{{ 'e.g. 8:45 AM' if field == 'Time' else field }}">
 </div>
 {% endfor %}
+<div class="field">
+  <label for="logged-by-input">Logged by (staff name)</label>
+  <input type="text" id="logged-by-input" name="logged_by" value="{{ form.get('logged_by', '') }}" placeholder="e.g. Mrs. Rao">
+</div>
 <div class="field span-all">
-  <label>Remarks</label>
-  <textarea name="remarks" placeholder="Any additional notes">{{ form.get('remarks', '') }}</textarea>
+  <label for="remarks-input">Remarks</label>
+  <textarea id="remarks-input" name="remarks" placeholder="Any additional notes">{{ form.get('remarks', '') }}</textarea>
 </div>

@@ -1,46 +1,72 @@
 {% extends "base.html" %}
 {% block title %}Master Student List{% endblock %}
 {% block content %}
-<h1>Master Student List</h1>
-<p class="subtitle">This is the "source of truth" name list used for autocomplete everywhere else. Keep it up to date and every entry form + the Excel dropdowns stay in sync.</p>
-<p style="margin:-12px 0 22px;">
-  <a class="btn btn-outline" href="{{ url_for('open_excel') }}">Open Excel file</a>
-  <span class="small-note" style="margin-left:8px;">Opens in Excel on the server PC; downloads a copy anywhere else. Close Excel before saving changes here.</span>
-</p>
+<header class="page-head" data-enter>
+  <div>
+    <p class="eyebrow">Data</p>
+    <h1>Master student list</h1>
+    <p class="subtitle">The one name list every form, scan and Excel dropdown checks against. Keep it current and every register stays in step.</p>
+  </div>
+  <div class="head-actions">
+    <a class="btn btn-outline" href="{{ url_for('open_excel') }}" title="Opens in Excel on the server PC; downloads a copy anywhere else. Close Excel before saving changes here.">Open Excel file</a>
+  </div>
+</header>
 
-<div class="panel">
+<section class="panel">
   <h2>Add a student</h2>
-  <form method="post" class="form-grid">
+  <p class="panel-sub">IDs are given automatically, in order.</p>
+  <form method="post" class="form-grid five">
     <input type="hidden" name="action" value="add">
-    <div class="field"><label>Full name</label><input type="text" name="name" required></div>
-    <div class="field"><label>Class</label><input type="text" name="klass" placeholder="e.g. 9"></div>
-    <div class="field"><label>Section</label><input type="text" name="section" placeholder="e.g. A"></div>
-    <div class="field"><label>Roll no.</label><input type="text" name="roll"></div>
-    <div class="field"><label>House</label><input type="text" name="house" placeholder="e.g. Red"></div>
-    <div class="field span2"><button class="btn btn-primary" type="submit">Add student</button></div>
+    <div class="field"><label for="new-name">Full name</label><input type="text" id="new-name" name="name" required></div>
+    <div class="field"><label for="new-class">Class</label><input type="text" id="new-class" name="klass" placeholder="e.g. 9"></div>
+    <div class="field"><label for="new-section">Section</label><input type="text" id="new-section" name="section" placeholder="e.g. A"></div>
+    <div class="field"><label for="new-roll">Roll no.</label><input type="text" id="new-roll" name="roll"></div>
+    <div class="field"><label for="new-house">House</label><input type="text" id="new-house" name="house" placeholder="e.g. Kailash"></div>
+    <div class="field span2"><button class="btn btn-primary" type="submit" style="align-self:flex-start">Add student</button></div>
   </form>
-</div>
+</section>
 
-<div class="panel">
-  <h2>All students ({{ students|length }})</h2>
+<section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>All students <span class="mono" style="color:var(--muted);font-size:15px">{{ students|length }}</span></h2>
+      <p class="panel-sub">Edit any cell, then save once at the bottom.</p>
+    </div>
+    <input type="search" id="student-filter" class="filter-input" placeholder="Filter by name, ID, class" aria-label="Filter students">
+  </div>
+  {% if students %}
   <form method="post">
     <input type="hidden" name="action" value="edit_all">
-    <table>
+    <div class="table-scroll">
+    <table id="students-table">
       <thead><tr><th>ID</th><th>Name</th><th>Class</th><th>Section</th><th>Roll</th><th>House</th></tr></thead>
       <tbody>
         {% for s in students %}
-        <tr>
-          <td>{{ s.id }}<input type="hidden" name="student_id" value="{{ s.id }}"></td>
-          <td><input type="text" name="name" value="{{ s.name }}" style="width: 180px;"></td>
-          <td><input type="text" name="klass" value="{{ s['class'] }}" style="width: 60px;"></td>
-          <td><input type="text" name="section" value="{{ s.section }}" style="width: 60px;"></td>
-          <td><input type="text" name="roll" value="{{ s.roll }}" style="width: 60px;"></td>
-          <td><input type="text" name="house" value="{{ s.house }}" style="width: 80px;"></td>
+        <tr data-search="{{ s.id }} {{ s.name }} {{ s['class'] }}-{{ s.section }} {{ s.house }}">
+          <td class="muted-cell"><a class="student-link" style="color:inherit" href="{{ student_url(s.name) }}" title="Open {{ s.name }}'s profile">{{ s.id }}</a><input type="hidden" name="student_id" value="{{ s.id }}"></td>
+          <td><input type="text" name="name" value="{{ s.name }}" aria-label="Name for {{ s.id }}" style="min-width:200px"></td>
+          <td><input type="text" name="klass" value="{{ s['class'] }}" aria-label="Class for {{ s.id }}" style="width:72px"></td>
+          <td><input type="text" name="section" value="{{ s.section }}" aria-label="Section for {{ s.id }}" style="width:72px"></td>
+          <td><input type="text" name="roll" value="{{ s.roll }}" aria-label="Roll for {{ s.id }}" style="width:72px"></td>
+          <td><input type="text" name="house" value="{{ s.house }}" aria-label="House for {{ s.id }}" style="min-width:120px"></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    <div style="margin-top: 14px;"><button class="btn btn-primary" type="submit">Save all changes</button></div>
+    </div>
+    <p class="small-note" id="student-filter-empty" hidden>No students match that filter.</p>
+    <div class="form-actions" style="margin-top:18px"><button class="btn btn-primary" type="submit">Save all changes</button></div>
   </form>
-</div>
+  {% else %}
+  <div class="empty-state">
+    <strong>No students yet</strong>
+    <p>Add the first student above. Every register's name search uses this list.</p>
+  </div>
+  {% endif %}
+</section>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  attachTableFilter(document.getElementById('student-filter'), document.getElementById('students-table'), document.getElementById('student-filter-empty'));
+</script>
 {% endblock %}

@@ -1,8 +1,9 @@
 """
 Automated smoke tests for the Discipline Tracker app.
 
-Runs against a throwaway COPY of the Excel database (never touches the real
-data/SchoolDisciplineSystem.xlsx), using Flask's test client so no server
+Runs against a throwaway workbook freshly built from build_excel_template.py
+(with its 5 example students), so it never reads or touches the real
+data/SchoolDisciplineSystem.xlsx. Uses Flask's test client, so no server
 needs to be running.
 
 Run:
@@ -20,11 +21,12 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REAL_DB = os.path.join(BASE_DIR, "data", "SchoolDisciplineSystem.xlsx")
+
+import build_excel_template as bet  # noqa: E402
 
 TMP_DIR = tempfile.mkdtemp(prefix="discipline_tracker_test_")
 TEST_DB = os.path.join(TMP_DIR, "TestDatabase.xlsx")
-shutil.copy(REAL_DB, TEST_DB)
+bet.build_workbook().save(TEST_DB)
 
 import app as appmod  # noqa: E402
 
@@ -678,6 +680,129 @@ def run():
     check("no data means no patterns", appmod.build_patterns({k: [] for k in appmod.CATEGORIES}, [], pt_today) == [])
     r = client.get("/")
     check("dashboard shows the Patterns panel", r.status_code == 200 and b"Patterns" in r.data)
+
+    run_find_tests()
+    run_roster_tests()
+
+
+def run_roster_tests():
+    import import_roster as ir
+    from openpyxl import Workbook, load_workbook as _lw
+
+    # A small roster shaped like the school's file: one sheet per grade.
+    roster_path = os.path.join(TMP_DIR, "roster.xlsx")
+    wb = Workbook()
+    wb.remove(wb.active)
+    sheets = {
+        "Grade 7": [("Samyuktha", "Kailash"), ("Tarun ", "Vindyas")],
+        "Grade 9": [("Samyuktha", "Vindhyas "), ("Advaith Sriram", "Aravalis")],
+        "Grade IB-1A": [("Advaith Sriram", "Vindhyas"), ("Gowtham Karthik", None), ("Aarav Sharma", "Kailash")],
+        "Grade IB-2": [("Drishya Chordia", "Nilgiris")],
+    }
+    for title, rows in sheets.items():
+        ws = wb.create_sheet(title)
+        ws.append(["Student Name ", "House "])
+        for r in rows:
+            ws.append(list(r))
+    wb.save(roster_path)
+
+    check("grade sheet -> class/section", ir.class_from_sheet("Grade IB-1A") == ("IB-1", "A")
+          and ir.class_from_sheet("Grade 10") == ("10", "") and ir.class_from_sheet("Grade IB-2") == ("IB-2", ""))
+
+    # Fresh database whose example students have no entries: they get replaced.
+    db = os.path.join(TMP_DIR, "roster_db.xlsx")
+    bet.build_workbook().save(db)
+    check("roster import runs", ir.main([roster_path, "--db", db]) == 0)
+    rows = ir.read_master(_lw(db)["MasterList"])
+    by_name = {r["name"]: r for r in rows}
+    check("roster: numbered from STU001 in file order", [r["id"] for r in rows] == [f"STU{i:03d}" for i in range(1, 9)]
+          and rows[0]["name"] == "Samyuktha (7)", str(rows))
+    check("roster: duplicate names get their class", {"Samyuktha (7)", "Samyuktha (9)", "Advaith Sriram (9)", "Advaith Sriram (IB-1A)"} <= set(by_name))
+    check("roster: houses cleaned", by_name["Tarun"]["house"] == "Vindhyas" and by_name["Advaith Sriram (9)"]["house"] == "Aravallis"
+          and by_name["Samyuktha (9)"]["house"] == "Vindhyas")
+    check("roster: IB class and section", by_name["Gowtham Karthik"]["class"] == "IB-1" and by_name["Gowtham Karthik"]["section"] == "A"
+          and by_name["Drishya Chordia"]["class"] == "IB-2" and by_name["Drishya Chordia"]["section"] == "")
+    check("roster: example students removed", "Rohan Gupta" not in by_name)
+    dash = _lw(db)["Dashboard"]
+    hdr = next(r for r in range(1, dash.max_row + 1) if dash.cell(row=r, column=2).value == "House")
+    check("roster: dashboard houses set", [dash.cell(row=hdr + i, column=2).value for i in range(1, 5)]
+          == ["Aravallis", "Kailash", "Nilgiris", "Vindhyas"])
+
+    # Re-running keeps every number, and a student with entries is never dropped.
+    appmod_db = appmod.DB_PATH
+    appmod.DB_PATH = db
+    appmod.append_log_entry("LateComers", {"Date": date.today(), "Name": "Tarun", "Time": "8:50"}, "T", "Manual")
+    sid_extra = appmod.add_student("Left School", "8", "", "", "Kailash")
+    appmod.DB_PATH = appmod_db
+    check("roster import re-run", ir.main([roster_path, "--db", db]) == 0)
+    rows2 = ir.read_master(_lw(db)["MasterList"])
+    check("roster: numbers stable on re-run", {r["name"]: r["id"] for r in rows2 if r["name"] in by_name}
+          == {n: r["id"] for n, r in by_name.items()})
+    check("roster: students not in roster are kept", any(r["id"] == sid_extra for r in rows2))
+
+    before = open(db, "rb").read()
+    check("roster dry run writes nothing", ir.main([roster_path, "--db", db, "--dry-run"]) == 0 and open(db, "rb").read() == before)
+
+
+def run_find_tests():
+    # A student nobody else's tests touch, with a known record.
+    sid = appmod.add_student("Zara Findtest", "11", "C", "7", "Testhouse")
+    today = date.today()
+    for i, t in enumerate(["8:50 AM", "8:55 AM", "9:00 AM"]):
+        appmod.append_log_entry("LateComers", {"Date": today - timedelta(days=i), "Name": "Zara Findtest",
+                                               "Time": t, "Reason": "Missed bus", "Remarks": ""}, "Tester", "Manual")
+    appmod.append_log_entry("Uniform", {"Date": today, "Name": "Zara Findtest", "Issue": "No tie"}, "Tester", "Manual")
+
+    r = client.get("/find")
+    check("find page loads", r.status_code == 200 and b"Find who was late" in r.data)
+    check("sidebar links to find", b'href="/find"' in r.data)
+
+    r = client.get("/find?q=findtest")
+    check("find by part of a name", r.status_code == 200 and b"Zara Findtest" in r.data and b"1 student<" in r.data, r.data[-3000:])
+    r = client.get(f"/find?q={sid}")
+    check("find by student ID", b"Zara Findtest" in r.data)
+    r = client.get("/find?q=findtest&klass=11&section=C&house=Testhouse")
+    check("find with class, section and house", b"Zara Findtest" in r.data)
+    r = client.get("/find?q=findtest&house=Kailash")
+    check("house filter excludes other houses", b"Zara Findtest" not in r.data.split(b"<section class=\"panel\">")[-1])
+
+    res = appmod.find_students(appmod.read_find_filters({"q": "findtest"}))
+    check("late count is 3 in Late Comers", len(res) == 1 and res[0]["count"] == 3, str(res))
+    check("usual arrival is the median time", res and res[0]["usual_time"] == "8:55 AM", str(res))
+    res = appmod.find_students(appmod.read_find_filters({"q": "findtest", "register": "all"}))
+    check("all registers counts every entry", res and res[0]["count"] == 4 and res[0]["by_register"]["Uniform"] == 1, str(res))
+    check("repeat filter keeps 3+", len(appmod.find_students(appmod.read_find_filters({"q": "findtest", "min": "3"}))) == 1)
+    check("repeat filter drops below 5", appmod.find_students(appmod.read_find_filters({"q": "findtest", "min": "5"})) == [])
+    check("today filter counts only today",
+          appmod.find_students(appmod.read_find_filters({"q": "findtest", "period": "today"}))[0]["count"] == 1)
+    check("bad filter values fall back safely", appmod.read_find_filters({"register": "Nope", "period": "x", "min": "abc"})
+          == {"q": "", "klass": "", "section": "", "house": "", "register": "LateComers", "period": "all", "min": 1})
+
+    r = client.get("/find/export.xlsx?q=findtest&register=all")
+    from openpyxl import load_workbook as _lw
+    ok = r.status_code == 200 and r.data[:2] == b"PK"
+    if ok:
+        ws = _lw(io.BytesIO(r.data)).active
+        names = [ws.cell(row=rr, column=1).value for rr in range(5, ws.max_row + 1)]
+        ok = names == ["Zara Findtest"] and ws.cell(row=5, column=5).value == 4
+    check("find Excel export has the filtered rows", ok)
+
+    r = client.get("/student?name=Zara+Findtest")
+    check("student profile loads", r.status_code == 200 and b"Zara Findtest" in r.data and sid.encode() in r.data)
+    check("profile shows history and patterns", b"Missed bus" in r.data and b"No tie" in r.data and b"Usually arrives around 8:55 AM" in r.data)
+    r = client.get(f"/student?name={sid}")
+    check("profile opens by student ID", r.status_code == 200 and b"Zara Findtest" in r.data)
+    r = client.get("/student?name=Nobody+Atall", follow_redirects=True)
+    check("unknown student redirects with a message", r.status_code == 200 and b"No student called" in r.data)
+    r = client.get("/student/export.xlsx?name=Zara+Findtest")
+    ok = r.status_code == 200 and r.data[:2] == b"PK"
+    if ok:
+        ws = _lw(io.BytesIO(r.data)).active
+        ok = ws.max_row - 4 == 4  # four entries under the header row
+    check("student Excel export has every entry", ok)
+
+    r = client.get("/entry/LateComers")
+    check("register names link to the profile", b'/student?name=Zara+Findtest' in r.data)
 
 
 try:

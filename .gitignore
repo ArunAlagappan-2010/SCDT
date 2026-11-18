@@ -24,3 +24,12 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Design-tool history (tasteskill palette deals)
+.taste-skill/
+
+# Created on each PC by the installer / launcher
+installer/install.json
+installer/mctm.ico
+data/server.pid
+data/server.log

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Find students{% endblock %}
+{% block content %}
+<header class="page-head" data-enter>
+  <div>
+    <p class="eyebrow">Find</p>
+    <h1>Find who was late</h1>
+    <p class="subtitle">Search by name, narrow by class or house, and spot students who keep turning up. Click a name to see everything about them.</p>
+  </div>
+  <div class="head-actions secondary-actions no-print">
+    <a class="btn btn-outline btn-sm" href="{{ url_for('find_export') }}?{{ query_string }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>
+      Download Excel
+    </a>
+    <button type="button" class="btn btn-outline btn-sm" onclick="window.print()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9V4h10v5M7 17H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M7 14h10v6H7z"/></svg>
+      Print or save PDF
+    </button>
+  </div>
+</header>
+
+<form method="get" action="{{ url_for('find') }}" class="panel find-panel no-print" id="find-form">
+  <div class="find-search autocomplete-wrap">
+    <label for="find-q" class="sr-only">Student name or ID</label>
+    <svg class="find-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input type="text" id="find-q" name="q" value="{{ filters.q }}" placeholder="Type a student's name or ID" autocomplete="off" autofocus>
+    <div class="autocomplete-list" id="find-q-list" role="listbox"></div>
+    <button class="btn btn-primary" type="submit">Find</button>
+  </div>
+
+  <div class="find-filters">
+    <div class="field">
+      <label for="f-register">Register</label>
+      <select id="f-register" name="register">
+        {% for key, cfg in categories.items() %}<option value="{{ key }}" {{ 'selected' if filters.register == key }}>{{ cfg.label }}</option>{% endfor %}
+        <option value="all" {{ 'selected' if filters.register == 'all' }}>All registers</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-period">When</label>
+      <select id="f-period" name="period">
+        {% for key, label in periods.items() %}<option value="{{ key }}" {{ 'selected' if filters.period == key }}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-class">Class</label>
+      <select id="f-class" name="klass">
+        <option value="">Any</option>
+        {% for c in options.classes %}<option value="{{ c }}" {{ 'selected' if filters.klass == c }}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-section">Section</label>
+      <select id="f-section" name="section">
+        <option value="">Any</option>
+        {% for c in options.sections %}<option value="{{ c }}" {{ 'selected' if filters.section == c }}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-house">House</label>
+      <select id="f-house" name="house">
+        <option value="">Any</option>
+        {% for c in options.houses %}<option value="{{ c }}" {{ 'selected' if filters.house == c }}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-min">Times</label>
+      <select id="f-min" name="min">
+        {% for n in min_choices %}<option value="{{ n }}" {{ 'selected' if filters.min == n }}>{{ 'Any' if n == 1 else n ~ ' or more' }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+  {% if searched %}<a class="text-link find-reset" href="{{ url_for('find') }}">Clear filters</a>{% endif %}
+</form>
+
+<section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>{{ results|length }} student{{ '' if results|length == 1 else 's' }}</h2>
+      <p class="panel-sub">{{ title }}. Most entries first.</p>
+    </div>
+  </div>
+
+  {% if results %}
+  <div class="table-scroll">
+  <table class="find-table">
+    <thead>
+      <tr>
+        <th>Student</th><th>Class</th><th>House</th><th class="num">Times</th>
+        {% if filters.register == 'all' %}{% for k, c in categories.items() %}<th class="num">{{ c.label }}</th>{% endfor %}{% endif %}
+        <th>Last entry</th>
+        {% if filters.register in ('LateComers', 'all') %}<th>Usual arrival</th>{% endif %}
+        <th>Latest reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in results %}
+      <tr>
+        <td class="name-cell"><a class="student-link" href="{{ student_url(g.name) }}">{{ g.name }}</a>{% if g.id %}<span class="muted-cell" style="margin-left:8px">{{ g.id }}</span>{% endif %}</td>
+        <td class="nowrap">{{ g['class'] }}</td>
+        <td>{{ g.house }}</td>
+        <td class="num"><span class="count-pill {{ 'count-pill-soft' if g.count < 3 else '' }}">{{ g.count }}</span></td>
+        {% if filters.register == 'all' %}{% for k in categories %}<td class="num {{ 'zero' if not g.by_register[k] }}">{{ g.by_register[k] }}</td>{% endfor %}{% endif %}
+        <td class="nowrap mono" style="font-size:13px">{{ g.last_date.strftime('%d %b %Y') if g.last_date else '' }}</td>
+        {% if filters.register in ('LateComers', 'all') %}<td class="nowrap mono" style="font-size:13px">{{ g.usual_time }}</td>{% endif %}
+        <td>{{ g.last_detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <strong>No one matches</strong>
+    <p>{% if searched %}Try a wider period, another register, or fewer filters.{% else %}Nobody has been logged in {{ categories[filters.register].label if filters.register != 'all' else 'any register' }} yet.{% endif %}</p>
+  </div>
+  {% endif %}
+</section>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  (function () {
+    const form = document.getElementById('find-form');
+    const q = document.getElementById('find-q');
+    // Picking a suggested student goes straight to their profile.
+    attachAutocomplete(q, document.getElementById('find-q-list'), {
+      onSelect: function (s) { window.location = '{{ url_for("student_profile") }}?name=' + encodeURIComponent(s.name); }
+    });
+    // Filters apply as soon as they change.
+    form.querySelectorAll('select').forEach(function (sel) {
+      sel.addEventListener('change', function () { form.submit(); });
+    });
+  })();
+</script>
+{% endblock %}

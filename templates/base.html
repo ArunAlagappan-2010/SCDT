@@ -4,46 +4,70 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{% block title %}Dashboard{% endblock %} - MCTM</title>
+<meta name="description" content="MCTM discipline and grooming tracker: late comers, defaulters, uniform, nails and hair.">
+<meta name="theme-color" content="#1b1b1b">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23a1ffcb'/%3E%3Ctext x='16' y='22' font-family='Arial' font-weight='700' font-size='16' text-anchor='middle' fill='%230f3d26'%3EM%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400..700&family=JetBrains+Mono:wght@400..500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <div class="shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="brand-mark">M</span>
-      <span class="brand-text">MCTM</span>
-    </div>
+  <aside class="sidebar" aria-label="Main navigation">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="brand-mark" aria-hidden="true">M</span>
+      <span class="brand-text"><b>MCTM</b><small>Discipline tracker</small></span>
+    </a>
     <nav>
-      <a href="{{ url_for('dashboard') }}" class="nav-link {{ 'active' if request.endpoint=='dashboard' else '' }}">Dashboard</a>
-      <a href="{{ url_for('scan') }}" class="nav-link nav-link-accent {{ 'active' if request.endpoint=='scan' else '' }}">Scan register</a>
-      <div class="nav-group-label">Categories</div>
+      <a href="{{ url_for('dashboard') }}" class="nav-link {{ 'active' if request.endpoint=='dashboard' else '' }}" {{ 'aria-current=page' if request.endpoint=='dashboard' else '' }}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        Dashboard
+      </a>
+      <a href="{{ url_for('find') }}" class="nav-link {{ 'active' if request.endpoint in ('find', 'student_profile') else '' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        Find students
+      </a>
+      <a href="{{ url_for('scan') }}" class="nav-link nav-link-accent {{ 'active' if request.endpoint in ('scan', 'scan_commit') else '' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/></svg>
+        Scan register
+      </a>
+      <div class="nav-group-label">Registers</div>
       {% for key, cfg in categories.items() %}
       <div class="nav-cat" style="--cat-color: {{ cfg.color }}">
-        <span class="nav-cat-dot"></span>
         <div class="nav-cat-links">
-          <a href="{{ url_for('entry', key=key) }}" class="nav-cat-title {{ 'active' if request.endpoint=='entry' and request.view_args.get('key')==key else '' }}">{{ cfg.label }}</a>
+          <a href="{{ url_for('entry', key=key) }}" class="nav-cat-title {{ 'active' if request.endpoint in ('entry', 'edit_entry') and request.view_args.get('key')==key else '' }}">
+            <span class="nav-cat-dot" aria-hidden="true"></span>{{ cfg.label }}
+          </a>
         </div>
       </div>
       {% endfor %}
       <div class="nav-group-label">Data</div>
-      <a href="{{ url_for('students') }}" class="nav-link {{ 'active' if request.endpoint=='students' else '' }}">Master student list</a>
-      <a href="{{ url_for('open_excel') }}" class="nav-link" title="Opens the Excel file on the server PC. On any other PC it downloads a copy instead.">Open Excel file</a>
+      <a href="{{ url_for('students') }}" class="nav-link {{ 'active' if request.endpoint=='students' else '' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5M16 4.5a3.5 3.5 0 0 1 0 7M18 14.8c1.8.7 3 2.5 3.5 5.2"/></svg>
+        Master student list
+      </a>
+      <a href="{{ url_for('open_excel') }}" class="nav-link" title="Opens the Excel file on the server PC. On any other PC it downloads a copy instead.">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M10 3v18"/></svg>
+        Open Excel file
+      </a>
     </nav>
+    <div class="sidebar-foot">Saved to SchoolDisciplineSystem.xlsx</div>
   </aside>
-  <main class="content">
+  <main class="content" id="main" tabindex="-1">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
-      <div class="flash-stack">
+      <div class="flash-stack" role="status">
         {% for category, message in messages %}
           <div class="flash flash-{{ category }}">{{ message }}</div>
         {% endfor %}
       </div>
       {% endif %}
     {% endwith %}
+    <div class="content-inner">
     {% block content %}{% endblock %}
+    </div>
   </main>
 </div>
 </body>

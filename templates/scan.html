@@ -1,38 +1,78 @@
 {% extends "base.html" %}
 {% block title %}Scan register{% endblock %}
 {% block content %}
-<h1>Scan register</h1>
-<p class="subtitle">Upload a photo of any register page &mdash; Late Comers, Defaulters, Uniform, or Nails &amp; Hair. We'll read the page's title to figure out which one it is, so you don't have to pick first.</p>
+<header class="page-head" data-enter>
+  <div>
+    <h1>Scan a register page</h1>
+    <p class="subtitle">Upload a photo of any register page. The page title tells us which register it belongs to, and you check every name before anything is saved.</p>
+  </div>
+  {% if ocr_available %}
+  <span class="engine-chip">Reading with <b>{{ ocr_backend }}</b></span>
+  {% else %}
+  <span class="engine-chip is-off">No reading engine set up</span>
+  {% endif %}
+</header>
 
 {% if not ocr_available %}
 <div class="warn-box">
-  OCR isn't set up on this server yet (the <code>pytesseract</code>/Tesseract engine is missing, and no Gemini API key is
-  configured). You can still upload &mdash; the page will show you the upload but no text will be extracted until one is set up. See README.md.
+  OCR isn't set up on this server yet: the Tesseract engine is missing and no Gemini API key is configured.
+  You can still upload, but no names will be read until one is set up. See README.md.
 </div>
-{% else %}
-<p class="small-note" style="margin-bottom:16px;">OCR engine: <b>{{ ocr_backend }}</b>{% if ocr_backend.startswith('Gemini') %} &mdash; typically takes 5&ndash;10 seconds per scan{% endif %}</p>
 {% endif %}
 
-<div class="panel">
-  <h2>Upload register photo</h2>
-  <form method="post" enctype="multipart/form-data" class="form-grid full" id="scan-form">
-    <input type="hidden" name="hint" value="{{ hint_key }}">
-    <div class="field">
-      <label>Photo (JPEG/PNG) of the register page</label>
-      <input type="file" name="photo" accept="image/*" capture="environment" required>
-    </div>
-    <div class="field">
-      <button class="btn btn-primary" type="submit" id="scan-submit">Scan &amp; review</button>
-    </div>
-  </form>
-  <p class="small-note">Tip: make sure the page's title/heading (e.g. "Uniform") is visible in the photo &mdash; that's what we use to sort it into the right category. Flat lighting and no shadows give the best results. Handwriting recognition is never perfect &mdash; you'll get to fix names and pick the category on the next screen before anything is saved.</p>
+<div class="grid-2">
+  <section class="panel">
+    <form method="post" enctype="multipart/form-data" class="form-grid full" id="scan-form">
+      <input type="hidden" name="hint" value="{{ hint_key }}">
+      <label class="dropzone" id="dropzone" for="photo-input" title="Choose or drop a photo of the register page">
+        <span class="dropzone-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16"/></svg>
+        </span>
+        <span id="dropzone-hint" hidden></span>
+        <input type="file" name="photo" id="photo-input" accept="image/*" capture="environment" required aria-label="Photo of the register page">
+      </label>
+      <div class="field">
+        <button class="btn btn-primary" type="submit" id="scan-submit">Scan and review</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel panel-muted">
+    <h2>For a clean read</h2>
+    <p class="panel-sub">Three things make the biggest difference.</p>
+    <ol class="tips">
+      <li><b>1</b><span>Keep the page title (for example "Uniform") in the photo. It decides the register.</span></li>
+      <li><b>2</b><span>Shoot straight down in flat light, with no shadow across the page.</span></li>
+      <li><b>3</b><span>Handwriting is never read perfectly. You fix names and pick the register on the next screen.</span></li>
+    </ol>
+  </section>
 </div>
 
 <script>
-  document.getElementById('scan-form').addEventListener('submit', function () {
-    const btn = document.getElementById('scan-submit');
-    btn.disabled = true;
-    btn.textContent = 'Processing... this can take a few seconds';
-  });
+  (function () {
+    const input = document.getElementById('photo-input');
+    const zone = document.getElementById('dropzone');
+    const hint = document.getElementById('dropzone-hint');
+    function show() {
+      if (input.files && input.files[0]) {
+        // Only text the drop area ever shows: the chosen file's name.
+        hint.textContent = input.files[0].name;
+        hint.className = 'dropzone-file';
+        hint.hidden = false;
+      }
+    }
+    input.addEventListener('change', show);
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function () { zone.classList.add('is-over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function () { zone.classList.remove('is-over'); setTimeout(show, 0); });
+    });
+    document.getElementById('scan-form').addEventListener('submit', function () {
+      const btn = document.getElementById('scan-submit');
+      btn.disabled = true;
+      btn.textContent = 'Reading the page...';
+    });
+  })();
 </script>
 {% endblock %}

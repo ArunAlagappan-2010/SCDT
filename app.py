@@ -102,26 +102,26 @@ _gemini_cooldown_until = {}
 # Colors are all drawn from one grey/green family (minimalist palette) --
 # categories are told apart by lightness/shade, not by clashing hues.
 CATEGORIES = {
-    # Monotone palette: every category is a shade of the same dark green
-    # (not a different hue) so the whole app stays grey + dark-green only.
+    # One green ramp, dark to mint, matching static/style.css and the Excel
+    # workbook: categories differ by shade, never by a clashing hue.
     "LateComers": {
         "label": "Late Comers",
-        "color": "#1E4030",
+        "color": "#123524",
         "extra_fields": [("Time", "text"), ("Reason", "text")],
     },
     "Defaulters": {
         "label": "Defaulters",
-        "color": "#2F6B4F",
+        "color": "#2E7D57",
         "extra_fields": [("Reason", "text")],
     },
     "Uniform": {
         "label": "Uniform",
-        "color": "#4F8A6C",
+        "color": "#5DBB8C",
         "extra_fields": [("Issue", "text")],
     },
     "NailsHair": {
         "label": "Nails & Hair",
-        "color": "#7FA893",
+        "color": "#A1E8C0",
         "extra_fields": [("Issue", "text")],
     },
 }
@@ -457,9 +457,9 @@ def delete_log_entry(key, entry_id):
         # Restore the auto-fill formulas the template puts in empty rows, so
         # picking a name in this row directly in Excel still fills it in.
         name_ref = f"C{r}"
-        ws.cell(row=r, column=4).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,2,FALSE),"")'
-        ws.cell(row=r, column=5).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,3,FALSE),"")'
-        ws.cell(row=r, column=6).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$F,5,FALSE),"")'
+        ws.cell(row=r, column=4).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,2,FALSE)&"","")'
+        ws.cell(row=r, column=5).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$D,3,FALSE)&"","")'
+        ws.cell(row=r, column=6).value = f'=IFERROR(VLOOKUP({name_ref},MasterList!$B:$F,5,FALSE)&"","")'
         save_wb(wb)
         return True
 
@@ -1473,6 +1473,331 @@ def students():
         return redirect(url_for("students"))
 
     return render_template("students.html", students=get_master_students(), categories=CATEGORIES)
+
+
+# ---------------------------------------------------------------------------
+# Find (who was late / who keeps turning up) and student profiles
+# ---------------------------------------------------------------------------
+
+FIND_PERIODS = {
+    "all": "All time",
+    "today": "Today",
+    "week": "This week",
+    "month": "This month",
+    "year": "This year",
+}
+FIND_MIN_TIMES = [1, 2, 3, 5, 10]
+
+
+def period_bounds(period, today=None):
+    """(start, end) dates for a FIND_PERIODS key; (None, None) for all time."""
+    today = today or date.today()
+    if period == "today":
+        return today, today
+    if period == "week":
+        return today - timedelta(days=today.weekday()), today
+    if period == "month":
+        return today.replace(day=1), today
+    if period == "year":
+        return today.replace(month=1, day=1), today
+    return None, None
+
+
+def all_entries(keys=None):
+    """Every saved entry across the chosen registers, each tagged with its
+    register key/label. Newest first."""
+    out = []
+    for key in keys or CATEGORIES:
+        for row in read_log_rows(key, limit=100000):
+            r = dict(row)
+            r["_key"] = key
+            r["_label"] = CATEGORIES[key]["label"]
+            r["_date"] = _row_date(row)
+            out.append(r)
+    out.sort(key=lambda r: (r["_date"] or date.min, r.get("EntryID") or ""), reverse=True)
+    return out
+
+
+def _norm(value):
+    return str(value or "").strip().lower()
+
+
+def read_find_filters(args):
+    register = args.get("register", "LateComers")
+    if register != "all" and register not in CATEGORIES:
+        register = "LateComers"
+    period = args.get("period", "all")
+    if period not in FIND_PERIODS:
+        period = "all"
+    try:
+        min_times = max(1, int(args.get("min", 1)))
+    except (TypeError, ValueError):
+        min_times = 1
+    return {
+        "q": (args.get("q") or "").strip(),
+        "klass": (args.get("klass") or "").strip(),
+        "section": (args.get("section") or "").strip(),
+        "house": (args.get("house") or "").strip(),
+        "register": register,
+        "period": period,
+        "min": min_times,
+    }
+
+
+def find_students(filters, students=None):
+    """One result per student who has matching entries, most entries first.
+    The name box matches any part of the name or the student ID."""
+    students = students if students is not None else get_master_students()
+    id_by_name = {_norm(s["name"]): s["id"] for s in students}
+    keys = list(CATEGORIES) if filters["register"] == "all" else [filters["register"]]
+    start, end = period_bounds(filters["period"])
+    q = _norm(filters["q"])
+
+    groups = {}
+    for row in all_entries(keys):
+        name = (row.get("Name") or "").strip()
+        if not name:
+            continue
+        sid = id_by_name.get(_norm(name), "")
+        if q and q not in _norm(name) and q != _norm(sid):
+            continue
+        if filters["klass"] and _norm(row.get("Class")) != _norm(filters["klass"]):
+            continue
+        if filters["section"] and _norm(row.get("Section")) != _norm(filters["section"]):
+            continue
+        if filters["house"] and _norm(row.get("House")) != _norm(filters["house"]):
+            continue
+        d = row["_date"]
+        if start and (d is None or not (start <= d <= end)):
+            continue
+
+        g = groups.setdefault(_norm(name), {
+            "name": name,
+            "id": sid,
+            "class": _row_class_label(row),
+            "house": row.get("House") or "",
+            "count": 0,
+            "by_register": {k: 0 for k in CATEGORIES},
+            "last_date": None,
+            "times": [],
+            "last_detail": "",
+        })
+        g["count"] += 1
+        g["by_register"][row["_key"]] += 1
+        if g["last_date"] is None:  # rows arrive newest first
+            g["last_date"] = d
+            detail_field = CATEGORIES[row["_key"]]["extra_fields"][-1][0]
+            g["last_detail"] = str(row.get(detail_field) or "")
+        t = _parse_clock_time(row.get("Time")) if row["_key"] == "LateComers" else None
+        if t:
+            g["times"].append(t)
+
+    results = []
+    for g in groups.values():
+        if g["count"] < filters["min"]:
+            continue
+        g["usual_time"] = _usual_time(g.pop("times"))
+        results.append(g)
+    results.sort(key=lambda g: (-g["count"], -(g["last_date"] or date.min).toordinal(), g["name"].lower()))
+    return results
+
+
+def _usual_time(times):
+    """Median arrival time, e.g. '8:42 AM', or '' if none recorded."""
+    if not times:
+        return ""
+    mins = sorted(t.hour * 60 + t.minute for t in times)
+    m = mins[len(mins) // 2]
+    return datetime.combine(date.today(), clock_time(m // 60, m % 60)).strftime("%I:%M %p").lstrip("0")
+
+
+def filter_options(students):
+    """Distinct classes, sections and houses for the filter dropdowns."""
+    def distinct(field, key=None):
+        return sorted({str(s.get(field) or "").strip() for s in students if str(s.get(field) or "").strip()}, key=key)
+    # Classes: 6, 7, ... 10 before IB-1, IB-2 (numeric grades first, in number order).
+    by_grade = lambda v: (0, int(v), "") if v.isdigit() else (1, 0, v)  # noqa: E731
+    return {"classes": distinct("class", by_grade), "sections": distinct("section"), "houses": distinct("house")}
+
+
+def student_profile_data(name):
+    """Everything about one student. Returns None if they have neither a
+    master-list record nor any entries."""
+    students = get_master_students()
+    record = resolve_student(name, students=students)
+    display_name = record["name"] if record else (name or "").strip()
+    entries = [r for r in all_entries() if _norm(r.get("Name")) == _norm(display_name)]
+    if not record and not entries:
+        return None
+
+    today = date.today()
+    month_start = today.replace(day=1)
+    totals = {}
+    for key, cfg in CATEGORIES.items():
+        rows = [r for r in entries if r["_key"] == key]
+        totals[key] = {
+            "label": cfg["label"],
+            "color": cfg["color"],
+            "all": len(rows),
+            "month": sum(1 for r in rows if r["_date"] and month_start <= r["_date"] <= today),
+        }
+
+    notes = []
+    late = [r for r in entries if r["_key"] == "LateComers"]
+    times = [t for t in (_parse_clock_time(r.get("Time")) for r in late) if t]
+    if times:
+        recorded = "1 time recorded" if len(times) == 1 else f"{len(times)} times recorded"
+        notes.append(f"Usually arrives around {_usual_time(times)} when late ({recorded}).")
+    dated = [r["_date"] for r in late if r["_date"]]
+    if len(dated) >= 3:
+        wd, n = Counter(d.weekday() for d in dated).most_common(1)[0]
+        if n >= 2:
+            notes.append(f"Late most often on {WEEKDAY_NAMES[wd]}s ({n} of {len(dated)}).")
+    reasons = Counter(str(r.get("Reason") or "").strip() for r in late if str(r.get("Reason") or "").strip())
+    if reasons:
+        reason, n = reasons.most_common(1)[0]
+        if n >= 2:
+            notes.append(f"Most common late reason: “{reason}” ({n} times).")
+    flags = [f for f in compute_weekly_repeat_flags({k: [r for r in entries if r["_key"] == k] for k in CATEGORIES})
+             if _norm(f["name"]) == _norm(display_name)]
+    if flags:
+        notes.append(f"Logged 3+ times in one week on {len(flags)} occasion{'s' if len(flags) != 1 else ''} (latest: {flags[0]['week_label']}).")
+
+    return {
+        "name": display_name,
+        "record": record,
+        "class": class_label(record) if record else (_row_class_label(entries[0]) if entries else ""),
+        "house": (record or {}).get("house") or (entries[0].get("House") if entries else ""),
+        "entries": entries,
+        "totals": totals,
+        "total": len(entries),
+        "notes": notes,
+        "first_date": min((r["_date"] for r in entries if r["_date"]), default=None),
+        "last_date": max((r["_date"] for r in entries if r["_date"]), default=None),
+    }
+
+
+def entry_detail(row):
+    """The register-specific text of an entry, e.g. '8:50 AM · Missed bus'."""
+    parts = [str(row.get(f) or "").strip() for f, _ in CATEGORIES[row["_key"]]["extra_fields"]]
+    return " · ".join(p for p in parts if p)
+
+
+def xlsx_response(title, headers, rows, filename, widths=None):
+    """A small styled .xlsx built in memory, for the Download buttons."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Results"
+    ws.sheet_view.showGridLines = False
+    ws["A1"] = title
+    ws["A1"].font = Font(name="Arial", size=14, bold=True, color="232323")
+    ws["A2"] = f"Exported from MCTM Tracker on {date.today().strftime('%d %b %Y')}"
+    ws["A2"].font = Font(name="Arial", size=9, color="686868")
+    hdr_row = 4
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=hdr_row, column=c, value=h)
+        cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="232323")
+        cell.border = Border(bottom=Side(style="medium", color="A1FFCB"))
+        cell.alignment = Alignment(vertical="center", indent=1)
+    ws.row_dimensions[hdr_row].height = 22
+    line = Border(bottom=Side(style="thin", color="E6E6E3"))
+    for r, values in enumerate(rows, start=hdr_row + 1):
+        for c, v in enumerate(values, start=1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name="Arial", size=10, color="232323")
+            cell.border = line
+            if isinstance(v, (date, datetime)):
+                cell.number_format = "dd mmm yyyy"
+                cell.alignment = Alignment(horizontal="left")
+    for i, w in enumerate(widths or [18] * len(headers), start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = ws.cell(row=hdr_row + 1, column=1)
+    if rows:
+        ws.auto_filter.ref = f"A{hdr_row}:{get_column_letter(len(headers))}{hdr_row + len(rows)}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def _find_title(filters):
+    reg = "All registers" if filters["register"] == "all" else CATEGORIES[filters["register"]]["label"]
+    bits = [reg, FIND_PERIODS[filters["period"]]]
+    for label, key in (("Class", "klass"), ("Section", "section"), ("House", "house")):
+        if filters[key]:
+            bits.append(f"{label} {filters[key]}")
+    if filters["q"]:
+        bits.append(f"“{filters['q']}”")
+    if filters["min"] > 1:
+        bits.append(f"{filters['min']}+ times")
+    return " · ".join(bits)
+
+
+@app.route("/find")
+def find():
+    students = get_master_students()
+    filters = read_find_filters(request.args)
+    searched = any(k in request.args for k in ("q", "klass", "section", "house", "register", "period", "min"))
+    results = find_students(filters, students)
+    return render_template(
+        "find.html", categories=CATEGORIES, filters=filters, results=results, searched=searched,
+        options=filter_options(students), periods=FIND_PERIODS, min_choices=FIND_MIN_TIMES,
+        title=_find_title(filters), query_string=request.query_string.decode(),
+    )
+
+
+@app.route("/find/export.xlsx")
+def find_export():
+    filters = read_find_filters(request.args)
+    results = find_students(filters)
+    headers = ["Student", "Student ID", "Class", "House", "Times"]
+    if filters["register"] == "all":
+        headers += [CATEGORIES[k]["label"] for k in CATEGORIES]
+    headers += ["Last entry", "Usual arrival", "Latest reason / issue"]
+    rows = []
+    for g in results:
+        values = [g["name"], g["id"], g["class"], g["house"], g["count"]]
+        if filters["register"] == "all":
+            values += [g["by_register"][k] for k in CATEGORIES]
+        values += [g["last_date"], g["usual_time"], g["last_detail"]]
+        rows.append(values)
+    widths = [24, 12, 9, 13, 8] + ([12] * len(CATEGORIES) if filters["register"] == "all" else []) + [13, 13, 30]
+    return xlsx_response(f"Find: {_find_title(filters)}", headers, rows,
+                         f"MCTM find {date.today().isoformat()}.xlsx", widths)
+
+
+@app.route("/student")
+def student_profile():
+    data = student_profile_data(request.args.get("name", ""))
+    if data is None:
+        flash(f"No student called “{request.args.get('name', '')}” in the master list or the registers.", "error")
+        return redirect(url_for("find"))
+    return render_template("student.html", categories=CATEGORIES, s=data, entry_detail=entry_detail, today=date.today())
+
+
+@app.route("/student/export.xlsx")
+def student_export():
+    data = student_profile_data(request.args.get("name", ""))
+    if data is None:
+        return redirect(url_for("find"))
+    rows = [[r["_date"], r["_label"], entry_detail(r), r.get("Remarks") or "", r.get("LoggedBy") or "",
+             "Scan" if r.get("Source") == "OCR" else (r.get("Source") or ""), r.get("EntryID") or ""]
+            for r in data["entries"]]
+    title = f"{data['name']}" + (f" ({data['record']['id']})" if data["record"] else "") + f", {data['class']}"
+    safe = re.sub(r"[^A-Za-z0-9 _-]", "", data["name"]).strip() or "student"
+    return xlsx_response(title, ["Date", "Register", "Time / reason / issue", "Remarks", "Logged by", "Source", "Entry"],
+                         rows, f"MCTM {safe}.xlsx", [13, 14, 32, 30, 15, 9, 11])
+
+
+@app.template_global()
+def student_url(name):
+    return url_for("student_profile", name=name) if name else "#"
 
 
 if __name__ == "__main__":

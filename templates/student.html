@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}{{ s.name }}{% endblock %}
+{% block content %}
+<header class="page-head" data-enter>
+  <div>
+    <p class="eyebrow no-print"><a class="text-link" href="{{ url_for('find') }}">Find</a> / Student</p>
+    <h1>{{ s.name }}</h1>
+    <p class="subtitle profile-meta">
+      {% if s.record %}<span class="mono">{{ s.record.id }}</span>{% else %}<span class="tag">Not in master list</span>{% endif %}
+      {% if s['class'] %}<span>Class {{ s['class'] }}</span>{% endif %}
+      {% if s.house %}<span>{{ s.house }} house</span>{% endif %}
+      {% if s.record and s.record.roll %}<span>Roll {{ s.record.roll }}</span>{% endif %}
+    </p>
+  </div>
+  <div class="head-actions secondary-actions no-print">
+    <a class="btn btn-outline btn-sm" href="{{ url_for('student_export', name=s.name) }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>
+      Download Excel
+    </a>
+    <button type="button" class="btn btn-outline btn-sm" onclick="window.print()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9V4h10v5M7 17H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M7 14h10v6H7z"/></svg>
+      Print or save PDF
+    </button>
+  </div>
+</header>
+
+<section class="category-grid profile-totals" aria-label="Entries by register">
+  {% for key, t in s.totals.items() %}
+  <article class="cat-card" style="--cat-color: {{ t.color }}">
+    <div class="cat-card-head"><span class="cat-swatch" aria-hidden="true"></span><h3>{{ t.label }}</h3></div>
+    <div class="period-view">
+      <div class="cat-number {{ 'cat-number-zero' if not t.all }}">{{ t.all }}</div>
+      <div class="cat-sub">{{ t.month }} this month</div>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+
+<div class="grid-2">
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>History <span class="mono" style="color:var(--muted);font-size:15px">{{ s.total }}</span></h2>
+        <p class="panel-sub">{% if s.first_date %}Every entry from {{ s.first_date.strftime('%d %b %Y') }} to {{ s.last_date.strftime('%d %b %Y') }}, newest first.{% else %}Every entry, newest first.{% endif %}</p>
+      </div>
+      {% if s.entries %}
+      <input type="search" id="history-filter" class="filter-input no-print" placeholder="Filter history" aria-label="Filter history">
+      {% endif %}
+    </div>
+    {% if s.entries %}
+    <div class="table-scroll">
+    <table id="history-table">
+      <thead><tr><th>Date</th><th>Register</th><th>Details</th><th>Remarks</th><th>By</th><th class="no-print"><span class="sr-only">Edit</span></th></tr></thead>
+      <tbody>
+        {% for r in s.entries %}
+        <tr>
+          <td class="nowrap mono" style="font-size:13px">{{ r._date.strftime('%d %b %Y') if r._date else '' }}</td>
+          <td class="nowrap"><span class="reg-tag" style="--cat-color: {{ categories[r._key].color }}">{{ r._label }}</span></td>
+          <td>{{ entry_detail(r) }}</td>
+          <td>{{ r.Remarks }}</td>
+          <td class="nowrap">{{ r.LoggedBy }}</td>
+          <td class="no-print"><a class="btn btn-sm btn-outline" href="{{ url_for('edit_entry', key=r._key, entry_id=r.EntryID) }}">Edit</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="small-note" id="history-empty" hidden>No entries match that filter.</p>
+    {% else %}
+    <div class="empty-state">
+      <strong>A clean record</strong>
+      <p>{{ s.name }} hasn't been logged in any register.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>What stands out</h2>
+    <p class="panel-sub">From every entry on record.</p>
+    {% if s.notes %}
+    <ul class="pattern-list">
+      {% for n in s.notes %}
+      <li class="pattern-item"><span class="pattern-mark" aria-hidden="true">&bull;</span><span>{{ n }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-state"><p>Nothing yet. Patterns show up after a few entries.</p></div>
+    {% endif %}
+    <div class="profile-links no-print">
+      <a class="btn btn-primary btn-sm" href="{{ url_for('entry', key='LateComers') }}">Log a new entry</a>
+      {% if s.record %}<a class="btn btn-outline btn-sm" href="{{ url_for('students') }}">Edit in master list</a>{% endif %}
+    </div>
+  </section>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>
+  attachTableFilter(document.getElementById('history-filter'), document.getElementById('history-table'), document.getElementById('history-empty'));
+</script>
+{% endblock %}
